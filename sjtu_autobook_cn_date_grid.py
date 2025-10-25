@@ -6,8 +6,9 @@ SJTU Sports Auto-Booker — Manual Login + No-Label Grid (Strict Success Check)
 ---------------------------------------------------------------------------
 使用方式：
 1) 先手动登录 https://sports.sjtu.edu.cn/ 并进入羽毛球预约网格页面（能看到日期页签+时间行+格子）。
-2) 运行脚本：
+2) 运行脚本（可用 --help 查看完整参数）：
    - 立刻测试：python this_script.py --now
+   - 指定日期偏移/时间段：python this_script.py --date-offset 6 --slots "18:00,19:00" --courts "2,3"
    - 等到 12:00：python this_script.py
 3) 脚本会在目标时间自动：
    - 选择“今天 + DATE_OFFSET_DAYS”的日期页签
@@ -20,41 +21,75 @@ SJTU Sports Auto-Booker — Manual Login + No-Label Grid (Strict Success Check)
 - 仍然不处理 jAccount 验证码；通过你手动登录规避。
 """
 
+import argparse
 import sys
 import time
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from typing import Iterable, List
+
 import pytz
 from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ====================== 配置 ======================
-START_URL = "https://sports.sjtu.edu.cn/pc/?locale=zh#/"
-DATE_OFFSET_DAYS = 7                    # 抢“今天+N天”
-OPEN_TIME_STR = "20:54:40"              # 每日开放时间
+@dataclass(frozen=True)
+class BookingConfig:
+    start_url: str = "https://sports.sjtu.edu.cn/pc/?locale=zh#/"
+    date_offset_days: int = 7
+    open_time_str: str = "20:54:40"
+    preferred_slots: List[str] = None
+    preferred_courts: List[int] = None
+    click_retries: int = 3
+    headless: bool = False
 
-# 优先尝试的时间行（左侧时刻的文字）
-PREFERRED_SLOTS = ["18:00", "19:00", "20:00", "14:00", "15:00", "16:00", "17:00"]
-
-# 在对应时间行内，优先点击的“第N块场地”（1表示场地1）
-PREFERRED_COURTS = [1,2,3,4,5,6,7,8,9]
-
-CLICK_RETRIES = 3
-HEADLESS = False
+    def with_defaults(self) -> "BookingConfig":
+        """填充可变默认值，避免在 dataclass 定义时共享列表。"""
+        return replace(
+            self,
+            preferred_slots=list(self.preferred_slots or [
+                "18:00",
+                "19:00",
+                "20:00",
+                "14:00",
+                "15:00",
+                "16:00",
+                "17:00",
+            ]),
+            preferred_courts=list(self.preferred_courts or [1, 2, 3, 4, 5, 6, 7, 8, 9]),
+        )
 # ==================================================
 
 TZ = pytz.timezone("Asia/Shanghai")
 
+
+def _split_list(raw: str, *, type_=str) -> List:
+    """将逗号/空格分隔的字符串转换成列表，过滤空项并转成目标类型。"""
+    if not raw:
+        return []
+    if isinstance(raw, Iterable) and not isinstance(raw, str):
+        return [type_(item) for item in raw]
+    parts = [seg.strip() for seg in str(raw).replace("/", ",").split(",")]
+    return [type_(p) for p in parts if p]
+
+
+def _positive_int(value: str) -> int:
+    ivalue = int(value)
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError("必须为正整数")
+    return ivalue
+
 def log(m):
     print(f"[{datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}] {m}", flush=True)
 
-def build_driver():
+def build_driver(config: BookingConfig):
     opts = Options()
-    if HEADLESS:
+    if config.headless:
         opts.add_argument("--headless=new")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
@@ -75,9 +110,16 @@ def wait_until(dt):
         remain = (dt - now).total_seconds()
         time.sleep(0.2 if remain < 3 else 1.0 if remain < 30 else 5.0)
 
-def next_open_time(s):
+def next_open_time(s: str):
     today = datetime.now(TZ).date()
-    h, m, x = map(int, s.split(":"))
+    parts = [int(p) for p in s.split(":")]
+    if len(parts) == 2:
+        h, m = parts
+        x = 0
+    elif len(parts) == 3:
+        h, m, x = parts
+    else:
+        raise ValueError("开放时间格式应为 HH:MM 或 HH:MM:SS")
     cand = TZ.localize(datetime(today.year, today.month, today.day, h, m, x))
     return cand if cand > datetime.now(TZ) else cand + timedelta(days=1)
 
@@ -268,18 +310,22 @@ def wait_success_toast(driver, timeout=4):
     log("未检测到明确成功提示。最近页面文本片段：{}".format(last_text[:60].replace("\n"," ")))
     return False
 
-def booking_flow(driver):
-    target_date = datetime.now(TZ) + timedelta(days=DATE_OFFSET_DAYS)
-    log(f"准备预约日期：{target_date.strftime('%Y-%m-%d')} (今天+{DATE_OFFSET_DAYS})")
+def booking_flow(driver, config: BookingConfig):
+    target_date = datetime.now(TZ) + timedelta(days=config.date_offset_days)
+    log(
+        "准备预约日期：{} (今天+{})".format(
+            target_date.strftime("%Y-%m-%d"), config.date_offset_days
+        )
+    )
     if not click_date_tab(driver, target_date):
         log("❌ 日期未选中，无法继续。")
         return
 
     # 遍历时间行与场地序号
-    for t in PREFERRED_SLOTS:
-        for c in PREFERRED_COURTS:
+    for t in config.preferred_slots:
+        for c in config.preferred_courts:
             ok = False
-            for _ in range(CLICK_RETRIES):
+            for _ in range(config.click_retries):
                 if strict_select_slot(driver, t, c):
                     ok = True
                     break
@@ -299,20 +345,83 @@ def booking_flow(driver):
 
     log("❌ 全部时间与场地组合尝试完毕，未成功。")
 
-def main():
-    driver = build_driver()
+def parse_args(argv):
+    default_config = BookingConfig().with_defaults()
+    parser = argparse.ArgumentParser(
+        description="SJTU 体育馆羽毛球自动预约脚本（需手动登录后使用）"
+    )
+    parser.add_argument("--now", action="store_true", help="立即执行，不等待开放时间")
+    parser.add_argument("--start-url", default=default_config.start_url, help="预约页面地址")
+    parser.add_argument(
+        "--date-offset",
+        type=_positive_int,
+        default=default_config.date_offset_days,
+        help="预约今天+N天的日期 (默认: %(default)s)",
+    )
+    parser.add_argument(
+        "--open-time",
+        default=default_config.open_time_str,
+        help="每日开放时间，格式 HH:MM 或 HH:MM:SS (默认: %(default)s)",
+    )
+    parser.add_argument(
+        "--slots",
+        default=",".join(default_config.preferred_slots),
+        help="优先尝试的时间行，逗号分隔 (默认: %(default)s)",
+    )
+    parser.add_argument(
+        "--courts",
+        default=",".join(str(x) for x in default_config.preferred_courts),
+        help="对应时间行内优先尝试的场地序号，逗号分隔 (默认: %(default)s)",
+    )
+    parser.add_argument(
+        "--click-retries",
+        type=_positive_int,
+        default=default_config.click_retries,
+        help="点击失败重试次数 (默认: %(default)s)",
+    )
+    parser.add_argument(
+        "--headless",
+        dest="headless",
+        action="store_true",
+        default=default_config.headless,
+        help="以无头模式运行浏览器",
+    )
+    parser.add_argument(
+        "--show-browser",
+        dest="headless",
+        action="store_false",
+        help="显示浏览器界面 (默认)",
+    )
+
+    args = parser.parse_args(argv)
+    config = BookingConfig(
+        start_url=args.start_url,
+        date_offset_days=args.date_offset,
+        open_time_str=args.open_time,
+        preferred_slots=_split_list(args.slots),
+        preferred_courts=_split_list(args.courts, type_=int),
+        click_retries=args.click_retries,
+        headless=args.headless,
+    ).with_defaults()
+    return args, config
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    args, config = parse_args(argv)
+    driver = build_driver(config)
     try:
-        driver.get(START_URL)
+        driver.get(config.start_url)
         log("请手动登录并停留在羽毛球网格页面（能看到日期页签与时间行）。")
         input("已到达页面后按 Enter 继续... ")
 
-        if "--now" in sys.argv:
+        if args.now:
             log("立即执行 (--now)")
-            booking_flow(driver)
+            booking_flow(driver, config)
         else:
-            target_dt = next_open_time(OPEN_TIME_STR)
+            target_dt = next_open_time(config.open_time_str)
             wait_until(target_dt)
-            booking_flow(driver)
+            booking_flow(driver, config)
 
         log("完成，8 秒后关闭浏览器。")
         time.sleep(8)
