@@ -269,8 +269,20 @@ def strict_select_slot(driver, time_text, court_index):
     """用 JS 执行严格选择；返回 True 表示“选择产生了实际效果”"""
     try:
         res = driver.execute_script(STRICT_CHECK_JS, time_text, court_index)
+        if not isinstance(res, dict):
+            log(f"JS 返回异常：{res!r}")
+            return False
         status = res.get("status")
-        log(f"时间{time_text} 第{court_index}块 -> {status} | before={res.get('before')} after={res.get('after')} info={res.get('info')}")
+        log(
+            "时间{} 第{}块 -> {} | before={} after={} info={}".format(
+                time_text,
+                court_index,
+                status,
+                res.get("before"),
+                res.get("after"),
+                res.get("info"),
+            )
+        )
         return status == "OK_SELECTED"
     except Exception as e:
         log(f"JS 执行失败：{e}")
@@ -338,10 +350,10 @@ def booking_flow(driver, config: BookingConfig):
 
             # 严格等待“明确成功提示/右侧状态变化”
             if wait_success_toast(driver, timeout=4):
-                log(f"✅ 预约成功：{t}  第{c}块")
+                log(f"✅ {c}号场地{t}时间预约成功")
                 return
             else:
-                log("⚠ 该格子最终判定失败，继续尝试下一组合。")
+                log(f"⚠ {c}号场地{t}时间预约失败，继续尝试下一组合。")
 
     log("❌ 全部时间与场地组合尝试完毕，未成功。")
 
