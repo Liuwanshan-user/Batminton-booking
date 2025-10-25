@@ -338,10 +338,10 @@ def booking_flow(driver, config: BookingConfig):
 
             # 严格等待“明确成功提示/右侧状态变化”
             if wait_success_toast(driver, timeout=4):
-                log(f"✅ 预约成功：{t}  第{c}块")
+                log(f"✅ {c}号场地{t}时间预约成功")
                 return
             else:
-                log("⚠ 该格子最终判定失败，继续尝试下一组合。")
+                log(f"⚠ {c}号场地{t}时间预约失败，继续尝试下一组合。")
 
     log("❌ 全部时间与场地组合尝试完毕，未成功。")
 
