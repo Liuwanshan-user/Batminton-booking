@@ -22,6 +22,7 @@ SJTU Sports Auto-Booker — Manual Login + No-Label Grid (Strict Success Check)
 """
 
 import argparse
+import json
 import sys
 import time
 from dataclasses import dataclass, replace
@@ -159,7 +160,7 @@ def click_date_tab(driver, target_date):
 # ---------- 关键：严格判断是否“真的选择成功/已下单成功” ----------
 STRICT_CHECK_JS = r"""
 /*
- 返回字典结构：
+ 返回 JSON 字符串，对应字典结构：
  {
    status: "OK_SELECTED" | "TIME_NOT_FOUND" | "ROW_OR_BUTTON_NOT_FOUND" | "CLICK_NO_EFFECT" | "BUTTON_DISABLED",
    before: { selectedCount, amount, submitEnabled },
@@ -198,21 +199,27 @@ STRICT_CHECK_JS = r"""
       const t = document.body.innerText || '';
       const m1 = t.match(/选中的?\D*(\d+)/);
       if(m1) selectedCount = parseInt(m1[1],10) || 0;
-    }catch(e){}
+    }catch(err){
+      // ignore
+    }
 
     // 2) 金额（匹配形如 ¥12 或 ￥12 或 12元）
     try{
       const t = (document.querySelector('aside, .right, .detail, .order')||document.body).innerText || '';
       const m2 = t.match(/[¥￥]\s*([0-9]+(\.[0-9]+)?)/) || t.match(/([0-9]+(\.[0-9]+)?)\s*元/);
       if(m2) amount = parseFloat(m2[1]) || 0.0;
-    }catch(e){}
+    }catch(err){
+      // ignore
+    }
 
     // 3) 立即下单按钮是否可点
     try{
       const btns = Array.from(document.querySelectorAll('button')).filter(b => /下单|预约|提交|支付/.test(b.textContent||''));
       const btn = btns[0];
       submitEnabled = !!(btn && !btn.disabled && btn.offsetParent !== null);
-    }catch(e){}
+    }catch(err){
+      // ignore
+    }
 
     return {selectedCount, amount, submitEnabled};
   }
@@ -223,45 +230,55 @@ STRICT_CHECK_JS = r"""
     return timeNodes.find(n => norm(n.textContent) === norm(timeText)) || null;
   }
 
-  const before = getPanelState();
-  const tnode = findTimeNode();
-  if(!tnode) return {status:'TIME_NOT_FOUND', before, after:before, info:'time label not found'};
+  try{
+    const before = getPanelState();
+    const tnode = findTimeNode();
+    if(!tnode) return JSON.stringify({status:'TIME_NOT_FOUND', before, after:before, info:'time label not found'});
 
-  // 聚合到包含多个按钮的行
-  let row = tnode;
-  let lastBtns = [];
-  for(let i=0;i<8;i++){
-    if(!row) break;
-    const btns = Array.from(row.querySelectorAll('button'));
-    const usable = btns.filter(b => isEnabled(b));
-    if(usable.length > 0){
-      lastBtns = usable;
-      break;
+    // 聚合到包含多个按钮的行
+    let row = tnode;
+    let lastBtns = [];
+    for(let i=0;i<8;i++){
+      if(!row) break;
+      const btns = Array.from(row.querySelectorAll('button'));
+      const usable = btns.filter(b => isEnabled(b));
+      if(usable.length > 0){
+        lastBtns = usable;
+        break;
+      }
+      row = row.parentElement;
     }
-    row = row.parentElement;
-  }
-  if(lastBtns.length === 0){
-    return {status:'ROW_OR_BUTTON_NOT_FOUND', before, after:before, info:'no clickable buttons in row'};
-  }
-  const idx = Math.min(lastBtns.length, courtIndex) - 1;
-  const btn = lastBtns[idx];
-  if(!isEnabled(btn)) return {status:'BUTTON_DISABLED', before, after:before, info:'button disabled'};
+    if(lastBtns.length === 0){
+      return JSON.stringify({status:'ROW_OR_BUTTON_NOT_FOUND', before, after:before, info:'no clickable buttons in row'});
+    }
+    const idx = Math.min(lastBtns.length, courtIndex) - 1;
+    const btn = lastBtns[idx];
+    if(!isEnabled(btn)) return JSON.stringify({status:'BUTTON_DISABLED', before, after:before, info:'button disabled'});
 
-  // 点击
-  btn.scrollIntoView({block:'center'});
-  btn.click();
+    // 点击
+    btn.scrollIntoView({block:'center'});
+    btn.click();
 
-  // 等待UI反应
-  const t0 = performance.now();
-  while(performance.now() - t0 < 1200){
-    // 轻微延时
-    // eslint-disable-next-line no-empty
+    // 等待UI反应
+    const t0 = performance.now();
+    while(performance.now() - t0 < 1200){
+      // 轻微延时
+      // eslint-disable-next-line no-empty
+    }
+    const after = getPanelState();
+
+    // 判断是否“真的产生了选择效果”
+    const changed = (after.selectedCount > before.selectedCount) || (after.amount > before.amount) || (!before.submitEnabled && after.submitEnabled);
+    return JSON.stringify({status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT', before, after, info:`btnCount=${lastBtns.length}`});
+  }catch(err){
+    let info = '';
+    try{
+      info = err && (err.stack || err.message || String(err));
+    }catch(_){
+      info = String(err);
+    }
+    return JSON.stringify({status:'JS_EXCEPTION', before:null, after:null, info});
   }
-  const after = getPanelState();
-
-  // 判断是否“真的产生了选择效果”
-  const changed = (after.selectedCount > before.selectedCount) || (after.amount > before.amount) || (!before.submitEnabled && after.submitEnabled);
-  return {status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT', before, after, info:`btnCount=${lastBtns.length}`};
 })();
 """
 
