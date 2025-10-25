@@ -285,20 +285,9 @@ STRICT_CHECK_JS = r"""
 def strict_select_slot(driver, time_text, court_index):
     """用 JS 执行严格选择；返回 True 表示“选择产生了实际效果”"""
     try:
-        raw = driver.execute_script(STRICT_CHECK_JS, time_text, court_index)
-        if isinstance(raw, str):
-            try:
-                res = json.loads(raw)
-            except json.JSONDecodeError:
-                log(f"JS 返回无法解析：{raw!r}")
-                return False
-            if not isinstance(res, dict):
-                log(f"JS 返回非字典结构：{res!r}")
-                return False
-        elif isinstance(raw, dict):
-            res = raw
-        else:
-            log(f"JS 返回异常：{raw!r}")
+        res = driver.execute_script(STRICT_CHECK_JS, time_text, court_index)
+        if not isinstance(res, dict):
+            log(f"JS 返回异常：{res!r}")
             return False
         status = res.get("status")
         log(
