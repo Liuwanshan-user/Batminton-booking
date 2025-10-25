@@ -269,8 +269,20 @@ def strict_select_slot(driver, time_text, court_index):
     """用 JS 执行严格选择；返回 True 表示“选择产生了实际效果”"""
     try:
         res = driver.execute_script(STRICT_CHECK_JS, time_text, court_index)
+        if not isinstance(res, dict):
+            log(f"JS 返回异常：{res!r}")
+            return False
         status = res.get("status")
-        log(f"时间{time_text} 第{court_index}块 -> {status} | before={res.get('before')} after={res.get('after')} info={res.get('info')}")
+        log(
+            "时间{} 第{}块 -> {} | before={} after={} info={}".format(
+                time_text,
+                court_index,
+                status,
+                res.get("before"),
+                res.get("after"),
+                res.get("info"),
+            )
+        )
         return status == "OK_SELECTED"
     except Exception as e:
         log(f"JS 执行失败：{e}")
