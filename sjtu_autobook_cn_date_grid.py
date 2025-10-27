@@ -47,6 +47,7 @@ class BookingConfig:
     preferred_slots: List[str] = None
     preferred_courts: List[int] = None
     click_retries: int = 3
+    date_refresh_retries: int = 6
     headless: bool = False
 
     def with_defaults(self) -> "BookingConfig":
@@ -85,6 +86,13 @@ def _positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError("必须为正整数")
     return ivalue
 
+
+def _non_negative_int(value: str) -> int:
+    ivalue = int(value)
+    if ivalue < 0:
+        raise argparse.ArgumentTypeError("必须为非负整数")
+    return ivalue
+
 def log(m):
     print(f"[{datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}] {m}", flush=True)
 
@@ -110,6 +118,16 @@ def wait_until(dt):
             break
         remain = (dt - now).total_seconds()
         time.sleep(0.2 if remain < 3 else 1.0 if remain < 30 else 5.0)
+
+
+def wait_page_ready(driver, timeout=5):
+    """等待当前页面的 readyState 变为 complete，保证刷新后元素可访问。"""
+    try:
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+    except Exception:
+        pass
 
 def next_open_time(s: str):
     today = datetime.now(TZ).date()
@@ -156,6 +174,43 @@ def click_date_tab(driver, target_date):
             pass
     log("未找到目标日期页签。")
     return False
+
+# ---------- 关键：严格判断是否“真的选择成功/已下单成功” ----------
+CONFIRM_BUTTON_KEYWORDS = ["提交订单", "提交", "确认", "确定", "同意", "我已阅读", "继续"]
+
+AGREE_NOTICE_JS = r"""
+(function(){
+  function isVisible(el){
+    if(!el) return false;
+    const style = window.getComputedStyle(el);
+    return style && style.visibility !== 'hidden' && style.display !== 'none' && el.offsetParent !== null;
+  }
+  function markChecked(cb){
+    if(!cb) return false;
+    if(cb.checked) return true;
+    cb.checked = true;
+    cb.dispatchEvent(new Event('input', {bubbles:true}));
+    cb.dispatchEvent(new Event('change', {bubbles:true}));
+    return cb.checked;
+  }
+  const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .el-dialog, .ant-modal, .ivu-modal, .n-dialog, .van-dialog, .modal, .dialog'));
+  if(dialogs.length === 0){ dialogs.push(document.body); }
+  for(const dlg of dialogs){
+    if(!dlg || !isVisible(dlg)) continue;
+    const text = (dlg.innerText||'').replace(/\s+/g,' ');
+    if(!/须知|本人已|阅读/.test(text)) continue;
+    const checkboxes = Array.from(dlg.querySelectorAll('input[type="checkbox"]'));
+    for(const cb of checkboxes){
+      if(!isVisible(cb) && !cb.closest('label')) continue;
+      const relatedText = ((cb.closest('label')||{}).innerText||'') + ' ' + text;
+      if(/本人已|须知|阅读/.test(relatedText)){
+        if(markChecked(cb)) return true;
+      }
+    }
+  }
+  return false;
+})();
+"""
 
 # ---------- 关键：严格判断是否“真的选择成功/已下单成功” ----------
 STRICT_CHECK_JS = r"""
@@ -306,16 +361,53 @@ def strict_select_slot(driver, time_text, court_index):
         return False
 
 def confirm_if_needed(driver):
-    """尝试点击确认/确定；若无弹窗则忽略"""
+    """处理可能出现的须知弹窗：自动勾选复选框并点击确认按钮。"""
+    handled = False
+
     try:
-        confirm = WebDriverWait(driver, 1.5).until(
-            EC.element_to_be_clickable((By.XPATH, "//button[contains(., '确认') or contains(., '确定')]"))
+        if driver.execute_script(AGREE_NOTICE_JS):
+            log("已自动勾选预订须知复选框")
+            handled = True
+    except Exception as e:
+        log(f"自动勾选预订须知失败：{e}")
+
+    try:
+        clicked_text = driver.execute_script(
+            """
+            const keywords = arguments[0];
+            function isVisible(el){
+              if(!el) return false;
+              const style = window.getComputedStyle(el);
+              return style && style.visibility !== 'hidden' && style.display !== 'none' && el.offsetParent !== null;
+            }
+            const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .el-dialog, .ant-modal, .ivu-modal, .n-dialog, .van-dialog, .modal, .dialog'));
+            if(dialogs.length === 0){ dialogs.push(document.body); }
+            for(const dlg of dialogs){
+              if(!dlg || !isVisible(dlg)) continue;
+              const buttons = Array.from(dlg.querySelectorAll('button'));
+              for(const btn of buttons){
+                if(!isVisible(btn)) continue;
+                const text = (btn.innerText || '').trim();
+                if(!text) continue;
+                for(const kw of keywords){
+                  if(text.includes(kw)){
+                    btn.click();
+                    return text;
+                  }
+                }
+              }
+            }
+            return null;
+            """,
+            CONFIRM_BUTTON_KEYWORDS,
         )
-        confirm.click()
-        log("已点击确认/确定")
-        return True
-    except Exception:
-        return False
+        if clicked_text:
+            log(f"已点击确认按钮：{clicked_text}")
+            return True
+    except Exception as e:
+        log(f"自动点击确认按钮失败：{e}")
+
+    return handled
 
 def wait_success_toast(driver, timeout=4):
     """等待明确成功提示；若出现“已满/不可选/失败/库存不足”等提示，立即判定失败"""
@@ -346,7 +438,21 @@ def booking_flow(driver, config: BookingConfig):
             target_date.strftime("%Y-%m-%d"), config.date_offset_days
         )
     )
-    if not click_date_tab(driver, target_date):
+    date_selected = False
+    for attempt in range(config.date_refresh_retries + 1):
+        if click_date_tab(driver, target_date):
+            date_selected = True
+            break
+        if attempt < config.date_refresh_retries:
+            log(
+                "未找到目标日期页签，刷新页面重试 ({}/{})".format(
+                    attempt + 1, config.date_refresh_retries
+                )
+            )
+            driver.refresh()
+            wait_page_ready(driver, timeout=6)
+            time.sleep(0.4)
+    if not date_selected:
         log("❌ 日期未选中，无法继续。")
         return
 
@@ -409,6 +515,12 @@ def parse_args(argv):
         help="点击失败重试次数 (默认: %(default)s)",
     )
     parser.add_argument(
+        "--date-refresh-retries",
+        type=_non_negative_int,
+        default=default_config.date_refresh_retries,
+        help="目标日期未出现时刷新页面的最大次数 (默认: %(default)s)",
+    )
+    parser.add_argument(
         "--headless",
         dest="headless",
         action="store_true",
@@ -430,6 +542,7 @@ def parse_args(argv):
         preferred_slots=_split_list(args.slots),
         preferred_courts=_split_list(args.courts, type_=int),
         click_retries=args.click_retries,
+        date_refresh_retries=args.date_refresh_retries,
         headless=args.headless,
     ).with_defaults()
     return args, config
