@@ -145,33 +145,50 @@ def next_open_time(s: str):
 def chinese_weekday(dt):
     return ["周一","周二","周三","周四","周五","周六","周日"][dt.weekday()]
 
-def click_date_tab(driver, target_date):
-    """更稳的中文日期匹配：10月31日、10月31日(周五)、10-31、2025-10-31 等。"""
-    mm, dd, wd = target_date.month, target_date.day, chinese_weekday(target_date)
-    candidates = [
-        f"{mm}月{dd}日 ({wd})", f"{mm}月{dd}日({wd})", f"{mm}月{dd}日",
-        f"{mm:02d}月{dd:02d}日",
-        target_date.strftime("%m-%d"),
-        target_date.strftime("%Y-%m-%d"),
-    ]
-    # 允许日期条需要横向滚动
-    for _ in range(8):
+def click_date_tab(driver, target_date, patience=0.0):
+    """更稳的中文日期匹配：10月31日、10月31日(周五)、10-31、2025-10-31 等。
+
+    为了抢票场景，默认快速返回；如需等待元素渲染，可通过 patience 给予极短宽限。
+    """
+
+    def try_click_once():
+        mm, dd, wd = target_date.month, target_date.day, chinese_weekday(target_date)
+        candidates = [
+            f"{mm}月{dd}日 ({wd})", f"{mm}月{dd}日({wd})", f"{mm}月{dd}日",
+            f"{mm:02d}月{dd:02d}日",
+            target_date.strftime("%m-%d"),
+            target_date.strftime("%Y-%m-%d"),
+        ]
         for txt in candidates:
             try:
-                el = WebDriverWait(driver, 0.9).until(
-                    EC.element_to_be_clickable((By.XPATH, f"//*[contains(normalize-space(text()), '{txt}')]"))
+                elements = driver.find_elements(
+                    By.XPATH,
+                    f"//*[contains(normalize-space(text()), '{txt}')]",
                 )
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-                el.click()
-                log(f"已点击日期：{txt}")
-                return True
             except Exception:
-                pass
-        # 向右轻微滚动页面，帮助日期条露出
-        try:
-            driver.execute_script("document.scrollingElement.scrollLeft += 320;")
-        except Exception:
-            pass
+                elements = []
+            for el in elements:
+                try:
+                    if not el.is_displayed():
+                        continue
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", el
+                    )
+                    el.click()
+                    log(f"已点击日期：{txt}")
+                    return True
+                except Exception:
+                    continue
+        return False
+
+    deadline = time.time() + max(0.0, patience)
+    while True:
+        if try_click_once():
+            return True
+        if time.time() >= deadline:
+            break
+        time.sleep(0.05)
+
     log("未找到目标日期页签。")
     return False
 
@@ -215,7 +232,7 @@ AGREE_NOTICE_JS = r"""
 # ---------- 关键：严格判断是否“真的选择成功/已下单成功” ----------
 STRICT_CHECK_JS = r"""
 /*
- 返回 JSON 字符串，对应字典结构：
+ 返回 JS 对象，对应字典结构：
  {
    status: "OK_SELECTED" | "TIME_NOT_FOUND" | "ROW_OR_BUTTON_NOT_FOUND" | "CLICK_NO_EFFECT" | "BUTTON_DISABLED",
    before: { selectedCount, amount, submitEnabled },
@@ -288,7 +305,7 @@ STRICT_CHECK_JS = r"""
   try{
     const before = getPanelState();
     const tnode = findTimeNode();
-    if(!tnode) return JSON.stringify({status:'TIME_NOT_FOUND', before, after:before, info:'time label not found'});
+    if(!tnode) return {status:'TIME_NOT_FOUND', before, after:before, info:'time label not found'};
 
     // 聚合到包含多个按钮的行
     let row = tnode;
@@ -304,11 +321,11 @@ STRICT_CHECK_JS = r"""
       row = row.parentElement;
     }
     if(lastBtns.length === 0){
-      return JSON.stringify({status:'ROW_OR_BUTTON_NOT_FOUND', before, after:before, info:'no clickable buttons in row'});
+      return {status:'ROW_OR_BUTTON_NOT_FOUND', before, after:before, info:'no clickable buttons in row'};
     }
     const idx = Math.min(lastBtns.length, courtIndex) - 1;
     const btn = lastBtns[idx];
-    if(!isEnabled(btn)) return JSON.stringify({status:'BUTTON_DISABLED', before, after:before, info:'button disabled'});
+    if(!isEnabled(btn)) return {status:'BUTTON_DISABLED', before, after:before, info:'button disabled'};
 
     // 点击
     btn.scrollIntoView({block:'center'});
@@ -324,7 +341,7 @@ STRICT_CHECK_JS = r"""
 
     // 判断是否“真的产生了选择效果”
     const changed = (after.selectedCount > before.selectedCount) || (after.amount > before.amount) || (!before.submitEnabled && after.submitEnabled);
-    return JSON.stringify({status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT', before, after, info:`btnCount=${lastBtns.length}`});
+    return {status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT', before, after, info:`btnCount=${lastBtns.length}`};
   }catch(err){
     let info = '';
     try{
@@ -332,19 +349,26 @@ STRICT_CHECK_JS = r"""
     }catch(_){
       info = String(err);
     }
-    return JSON.stringify({status:'JS_EXCEPTION', before:null, after:null, info});
+    return {status:'JS_EXCEPTION', before:null, after:null, info};
   }
 })();
 """
 
 def strict_select_slot(driver, time_text, court_index):
-    """用 JS 执行严格选择；返回 True 表示“选择产生了实际效果”"""
+    """用 JS 执行严格选择；返回 (是否成功, 状态代码, 附加信息)。"""
     try:
         res = driver.execute_script(STRICT_CHECK_JS, time_text, court_index)
+        if isinstance(res, str):
+            try:
+                res = json.loads(res)
+            except Exception:
+                log(f"JS 返回字符串无法解析：{res!r}")
+                return False, "INVALID_JSON", res
         if not isinstance(res, dict):
             log(f"JS 返回异常：{res!r}")
-            return False
-        status = res.get("status")
+            return False, "INVALID_RESPONSE", str(res)
+        status = res.get("status") or "UNKNOWN"
+        info = res.get("info") or ""
         log(
             "时间{} 第{}块 -> {} | before={} after={} info={}".format(
                 time_text,
@@ -352,13 +376,14 @@ def strict_select_slot(driver, time_text, court_index):
                 status,
                 res.get("before"),
                 res.get("after"),
-                res.get("info"),
+                info,
             )
         )
-        return status == "OK_SELECTED"
+        return status == "OK_SELECTED", status, info
     except Exception as e:
-        log(f"JS 执行失败：{e}")
-        return False
+        msg = str(e)
+        log(f"JS 执行失败：{msg}")
+        return False, "PY_EXCEPTION", msg
 
 def confirm_if_needed(driver):
     """处理可能出现的须知弹窗：自动勾选复选框并点击确认按钮。"""
@@ -440,7 +465,8 @@ def booking_flow(driver, config: BookingConfig):
     )
     date_selected = False
     for attempt in range(config.date_refresh_retries + 1):
-        if click_date_tab(driver, target_date):
+        log(f"寻找目标日期页签：第{attempt + 1}轮")
+        if click_date_tab(driver, target_date, patience=0.25):
             date_selected = True
             break
         if attempt < config.date_refresh_retries:
@@ -451,7 +477,8 @@ def booking_flow(driver, config: BookingConfig):
             )
             driver.refresh()
             wait_page_ready(driver, timeout=6)
-            time.sleep(0.4)
+            log("页面已刷新，继续检测日期。")
+            time.sleep(0.1)
     if not date_selected:
         log("❌ 日期未选中，无法继续。")
         return
@@ -459,17 +486,31 @@ def booking_flow(driver, config: BookingConfig):
     # 遍历时间行与场地序号
     for t in config.preferred_slots:
         for c in config.preferred_courts:
+            log(f"---- 尝试预约：时间 {t} | 第{c}号场地 ----")
             ok = False
-            for _ in range(config.click_retries):
-                if strict_select_slot(driver, t, c):
+            last_status = ""
+            last_info = ""
+            for retry_idx in range(1, config.click_retries + 1):
+                success, status, info = strict_select_slot(driver, t, c)
+                last_status, last_info = status, info
+                if success:
                     ok = True
                     break
+                log(
+                    f"点击未生效 ({status}{' - ' + info if info else ''})，准备重试 ({retry_idx}/{config.click_retries})"
+                )
                 time.sleep(0.05)
             if not ok:
+                log(
+                    f"该组合点击失败，最后状态：{last_status}{' - ' + last_info if last_info else ''}，切换下一组合。"
+                )
                 continue
 
             # 可能弹出确认
-            confirm_if_needed(driver)
+            if confirm_if_needed(driver):
+                log("已自动处理须知弹窗/确认按钮。")
+            else:
+                log("未检测到须知弹窗，直接进入提交判断。")
 
             # 严格等待“明确成功提示/右侧状态变化”
             if wait_success_toast(driver, timeout=4):
