@@ -497,20 +497,21 @@ try {
         var targetRow = rows[timeIndex];
         var allSeats = Array.from(targetRow.querySelectorAll('.seat'));
 
-        // 过滤可用的场地
+        // 过滤可用的场地：只排除已购买的
         lastSeats = allSeats.filter(function (s) {
+          if (!isVisible(s)) return false;
+
           var innerSeat = s.querySelector('.inner-seat');
           if (!innerSeat) return false;
 
-          // 检查是否是可选的（unselected-seat）
+          // 只排除 bought-seat（已购买的）
           var className = innerSeat.className || '';
-          var isUnselected = /unselected/.test(className);
-          var isBought = /bought|disabled|unavailable/.test(className);
+          var isBought = /bought/.test(className);
 
-          return isVisible(s) && isUnselected && !isBought;
+          return !isBought;
         });
 
-        debugInfo.push('row' + timeIndex + ':total=' + allSeats.length + ',available=' + lastSeats.length);
+        debugInfo.push('row' + timeIndex + ':total=' + allSeats.length + ',clickable=' + lastSeats.length);
       } else {
         debugInfo.push('timeIndex=' + timeIndex + ' >= rows.length=' + rows.length);
       }
@@ -525,10 +526,11 @@ try {
       if (!row) break;
       var seats = Array.from(row.querySelectorAll('.seat'));
       var usableSeats = seats.filter(function (s) {
+        if (!isVisible(s)) return false;
         var innerSeat = s.querySelector('.inner-seat');
         if (!innerSeat) return false;
         var className = innerSeat.className || '';
-        return isVisible(s) && /unselected/.test(className) && !/bought|disabled/.test(className);
+        return !/bought/.test(className);  // 只排除已购买的
       });
       debugInfo.push('fallback-level' + i + ':' + usableSeats.length);
       if (usableSeats.length > 0) {
@@ -540,22 +542,25 @@ try {
   }
 
   if (lastSeats.length === 0) {
-    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: 'no available seats - ' + debugInfo.join(',') });
+    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: 'no clickable seats - ' + debugInfo.join(',') });
     return;
   }
 
   var idx = Math.min(lastSeats.length, courtIndex) - 1;
   var targetEl = lastSeats[idx];
 
-  // 检查元素是否可点击
+  // 简化点击检查：只要不是 bought 就尝试点击
   var canClick = true;
   if (targetEl.classList && targetEl.classList.contains('seat')) {
     var innerSeat = targetEl.querySelector('.inner-seat');
-    canClick = innerSeat && /unselected/.test(innerSeat.className || '');
+    if (innerSeat) {
+      var className = innerSeat.className || '';
+      canClick = !/bought/.test(className);
+    }
   }
 
   if (!canClick) {
-    finish({ status: 'BUTTON_DISABLED', before: before, after: before, info: 'seat not clickable, idx=' + idx + ' - ' + debugInfo.join(',') });
+    finish({ status: 'BUTTON_DISABLED', before: before, after: before, info: 'seat is bought, idx=' + idx + ' - ' + debugInfo.join(',') });
     return;
   }
 
