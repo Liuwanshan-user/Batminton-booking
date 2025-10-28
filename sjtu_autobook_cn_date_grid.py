@@ -11,6 +11,7 @@ SJTU Sports Auto-Booker — Manual Login + No-Label Grid (Strict Success Check)
    - 指定日期偏移/时间段：python this_script.py --date-offset 6 --slots "18:00,19:00" --courts "2,3"
    - 等到 12:00：python this_script.py
 3) 脚本会在目标时间自动：
+   - 根据配置重新打开主站并导航到指定场馆/活动（默认：气膜体育中心 → 羽毛球）
    - 选择“今天 + DATE_OFFSET_DAYS”的日期页签
    - 遍历 PREFERRED_SLOTS（时间行）与 PREFERRED_COURTS（该行第 N 块）尝试点击
    - 若出现确认弹窗会点“确认/确定”
@@ -31,6 +32,7 @@ from typing import Iterable, List
 
 import pytz
 from selenium import webdriver
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
@@ -44,6 +46,8 @@ class BookingConfig:
     start_url: str = "https://sports.sjtu.edu.cn/pc/?locale=zh#/"
     date_offset_days: int = 7
     open_time_str: str = "20:54:40"
+    venue_name: str = "气膜体育中心"
+    activity_name: str = "羽毛球"
     preferred_slots: List[str] = None
     preferred_courts: List[int] = None
     click_retries: int = 3
@@ -87,6 +91,123 @@ def _positive_int(value: str) -> int:
 
 def log(m):
     print(f"[{datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}] {m}", flush=True)
+
+
+def wait_document_ready(driver, timeout=12):
+    try:
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+        return True
+    except TimeoutException:
+        log("⚠ 页面在指定时间内未完全加载。")
+        return False
+
+
+def is_on_grid_page(driver) -> bool:
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+    except Exception:
+        body_text = driver.page_source
+    keywords = ["选中的", "立即下单", "预约", "金额"]
+    return any(k in body_text for k in keywords)
+
+
+def wait_for_grid_ready(driver, timeout=12):
+    keywords = ["选中的", "立即下单", "预约", "金额"]
+    try:
+        WebDriverWait(driver, timeout).until(
+            lambda d: any(k in (d.page_source or "") for k in keywords)
+        )
+        log("✅ 检测到预约页面关键字，认为已到达网格页面。")
+        return True
+    except TimeoutException:
+        log("⚠ 未能在限定时间内确认预约网格加载完成。")
+        return False
+
+
+def _click_element_by_text(driver, target_text: str, description: str, timeout=10):
+    if not target_text:
+        return True
+    log(f"查找{description}：{target_text}")
+    xpaths = [
+        f"//button[normalize-space()='{target_text}']",
+        f"//a[normalize-space()='{target_text}']",
+        f"//span[normalize-space()='{target_text}']",
+        f"//div[normalize-space()='{target_text}']",
+        f"//h3[contains(normalize-space(), '{target_text}')]",
+        f"//*[@role='tab' and contains(normalize-space(), '{target_text}')]",
+        f"//*[@role='button' and contains(normalize-space(), '{target_text}')]",
+        f"//p[contains(normalize-space(), '{target_text}')]",
+    ]
+    end = time.time() + timeout
+    while time.time() < end:
+        for xp in xpaths:
+            try:
+                elements = driver.find_elements(By.XPATH, xp)
+            except Exception:
+                continue
+            for el in elements:
+                try:
+                    if not el.is_displayed():
+                        continue
+                except StaleElementReferenceException:
+                    continue
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                except Exception:
+                    pass
+                try:
+                    el.click()
+                except Exception:
+                    try:
+                        driver.execute_script("arguments[0].click();", el)
+                    except Exception:
+                        continue
+                log(f"已点击{description}：{target_text}")
+                time.sleep(0.4)
+                return True
+        time.sleep(0.3)
+    log(f"❌ 未能点击{description}：{target_text}")
+    return False
+
+
+def navigate_to_activity(driver, config: BookingConfig, *, force_home=False) -> bool:
+    if is_on_grid_page(driver):
+        log("检测到当前已在预约网格页面。")
+        return True
+
+    def _navigate_from_current_page():
+        if is_on_grid_page(driver):
+            return True
+        if not _click_element_by_text(driver, config.venue_name, "场馆"):
+            return False
+        # 等待场馆详情加载
+        time.sleep(0.8)
+        if config.activity_name and not _click_element_by_text(driver, config.activity_name, "活动"):
+            return False
+        wait_for_grid_ready(driver, timeout=12)
+        return is_on_grid_page(driver)
+
+    if force_home:
+        log(f"打开预约主页面：{config.start_url}")
+        driver.get(config.start_url)
+        wait_document_ready(driver, timeout=12)
+
+    if _navigate_from_current_page():
+        log(f"✅ 已导航到目标页面：{config.venue_name} → {config.activity_name}")
+        return True
+
+    log("当前页面未找到目标场馆/活动，尝试返回主页面重新定位。")
+    driver.get(config.start_url)
+    wait_document_ready(driver, timeout=12)
+    if _navigate_from_current_page():
+        log(f"✅ 已导航到目标页面：{config.venue_name} → {config.activity_name}")
+        return True
+
+    log("❌ 自动导航到目标场馆/活动失败，请手动检查页面。")
+    return False
+
 
 def build_driver(config: BookingConfig):
     opts = Options()
@@ -285,9 +406,17 @@ STRICT_CHECK_JS = r"""
 def strict_select_slot(driver, time_text, court_index):
     """用 JS 执行严格选择；返回 True 表示“选择产生了实际效果”"""
     try:
-        res = driver.execute_script(STRICT_CHECK_JS, time_text, court_index)
-        if not isinstance(res, dict):
-            log(f"JS 返回异常：{res!r}")
+        raw = driver.execute_script(STRICT_CHECK_JS, time_text, court_index)
+        if isinstance(raw, str):
+            try:
+                res = json.loads(raw)
+            except Exception as exc:
+                log(f"JS 返回内容无法解析：{raw!r} ({exc})")
+                return False
+        elif isinstance(raw, dict):
+            res = raw
+        else:
+            log(f"JS 返回异常：{raw!r}")
             return False
         status = res.get("status")
         log(
@@ -377,7 +506,7 @@ def booking_flow(driver, config: BookingConfig):
 def parse_args(argv):
     default_config = BookingConfig().with_defaults()
     parser = argparse.ArgumentParser(
-        description="SJTU 体育馆羽毛球自动预约脚本（需手动登录后使用）"
+        description="SJTU 体育馆自动预约脚本（需手动登录后使用）"
     )
     parser.add_argument("--now", action="store_true", help="立即执行，不等待开放时间")
     parser.add_argument("--start-url", default=default_config.start_url, help="预约页面地址")
@@ -391,6 +520,16 @@ def parse_args(argv):
         "--open-time",
         default=default_config.open_time_str,
         help="每日开放时间，格式 HH:MM 或 HH:MM:SS (默认: %(default)s)",
+    )
+    parser.add_argument(
+        "--venue-name",
+        default=default_config.venue_name,
+        help="目标场馆名称 (默认: %(default)s)",
+    )
+    parser.add_argument(
+        "--activity-name",
+        default=default_config.activity_name,
+        help="目标活动/项目名称 (默认: %(default)s)",
     )
     parser.add_argument(
         "--slots",
@@ -427,6 +566,8 @@ def parse_args(argv):
         start_url=args.start_url,
         date_offset_days=args.date_offset,
         open_time_str=args.open_time,
+        venue_name=args.venue_name,
+        activity_name=args.activity_name,
         preferred_slots=_split_list(args.slots),
         preferred_courts=_split_list(args.courts, type_=int),
         click_retries=args.click_retries,
@@ -441,8 +582,12 @@ def main(argv=None):
     driver = build_driver(config)
     try:
         driver.get(config.start_url)
-        log("请手动登录并停留在羽毛球网格页面（能看到日期页签与时间行）。")
-        input("已到达页面后按 Enter 继续... ")
+        log("请手动登录体育场馆系统，完成后按 Enter 继续（脚本会自动前往目标场馆/活动）。")
+        input("登录完成后按 Enter ... ")
+
+        if not navigate_to_activity(driver, config, force_home=True):
+            log("❌ 初始导航失败，结束任务。")
+            return
 
         if args.now:
             log("立即执行 (--now)")
@@ -450,6 +595,13 @@ def main(argv=None):
         else:
             target_dt = next_open_time(config.open_time_str)
             wait_until(target_dt)
+            log("⏰ 已到开放时间，刷新页面以获取最新数据。")
+            driver.refresh()
+            wait_document_ready(driver, timeout=12)
+            log("🔄 页面刷新完成，重新跳转至目标场馆和活动。")
+            if not navigate_to_activity(driver, config, force_home=False):
+                log("❌ 刷新后自动导航失败，结束任务。")
+                return
             booking_flow(driver, config)
 
         log("完成，8 秒后关闭浏览器。")
