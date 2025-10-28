@@ -615,7 +615,7 @@ try {
 """
 
 def strict_select_slot(driver, time_text, court_index, config=None):
-    """用 JS 执行严格选择；返回 True 表示"选择产生了实际效果""""
+    """用 JS 执行严格选择；返回 True 表示选择产生了实际效果"""
     try:
         raw = driver.execute_async_script(STRICT_CHECK_JS, time_text, court_index)
         if isinstance(raw, str):
