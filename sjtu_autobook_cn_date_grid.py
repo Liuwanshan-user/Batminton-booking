@@ -745,6 +745,74 @@ def click_submit_order_button(driver, timeout: float = 3.0) -> bool:
     return False
 
 
+def accept_booking_notice_if_present(driver, timeout: float = 4.0) -> bool:
+    """若弹出“预订须知”提示框，则自动勾选并提交。"""
+    end_time = time.time() + timeout
+    dialog_xpath = "//div[contains(@class, 'el-dialog') and .//span[contains(normalize-space(), '预订须知')]]"
+
+    while time.time() < end_time:
+        try:
+            dialogs = driver.find_elements(By.XPATH, dialog_xpath)
+        except Exception:
+            dialogs = []
+
+        dialog = None
+        for candidate in dialogs:
+            try:
+                if candidate.is_displayed():
+                    dialog = candidate
+                    break
+            except Exception:
+                continue
+
+        if dialog is None:
+            time.sleep(0.1)
+            continue
+
+        try:
+            checkbox_input = dialog.find_element(
+                By.XPATH,
+                ".//label[contains(@class, 'el-checkbox')]//input[@type='checkbox']",
+            )
+            if not checkbox_input.is_selected():
+                try:
+                    checkbox = dialog.find_element(
+                        By.XPATH,
+                        ".//label[contains(@class, 'el-checkbox')]//span[contains(@class, 'el-checkbox__inner')]",
+                    )
+                    driver.execute_script("arguments[0].click();", checkbox)
+                except Exception:
+                    driver.execute_script("arguments[0].click();", checkbox_input)
+            log("已勾选预订须知复选框。")
+        except Exception:
+            log("⚠ 未能自动勾选预订须知复选框。")
+            return False
+
+        try:
+            submit_btn = dialog.find_element(
+                By.XPATH,
+                ".//button[.//span[contains(normalize-space(), '提交订单')]]",
+            )
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", submit_btn)
+            for action in (
+                submit_btn.click,
+                lambda b=submit_btn: driver.execute_script("arguments[0].click();", b),
+            ):
+                try:
+                    action()
+                    log("已在预订须知弹窗内点击提交订单。")
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            log("⚠ 未能在预订须知弹窗内点击提交订单。")
+            return False
+
+    # 超时未检测到弹窗，视为无需处理
+    log("⏱ 未检测到预订须知弹窗，继续。")
+    return True
+
+
 def confirm_if_needed(driver):
     """尝试点击确认/确定；若无弹窗则忽略"""
     try:
@@ -809,6 +877,10 @@ def booking_flow(driver, config: BookingConfig):
 
             if not click_submit_order_button(driver):
                 log("⚠ 未能点击立即下单按钮，尝试下一组合。")
+                continue
+
+            if not accept_booking_notice_if_present(driver):
+                log("⚠ 未能通过预订须知弹窗，尝试下一组合。")
                 continue
 
             time.sleep(0.2)
