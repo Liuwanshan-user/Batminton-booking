@@ -468,106 +468,79 @@ try {
     return;
   }
 
-  // 策略1: 查找 div.seat（实际的场地元素）
-  var row = tnode;
   var lastSeats = [];
   var debugInfo = [];
 
-  // 先尝试查找 div.seat 元素
-  for (var i = 0; i < 8; i += 1) {
-    if (!row) break;
-    var seats = Array.from(row.querySelectorAll('.seat'));
-    var usableSeats = seats.filter(function (s) {
-      // 排除已被购买的场地（bought-seat class）
-      var innerSeat = s.querySelector('.inner-seat');
-      if (innerSeat && /bought|disabled|unavailable|满/.test(innerSeat.className || '')) {
-        return false;
+  // 新策略：通过索引匹配时间行和场地行
+  // 1. 找到时间在 ul.leftUl 中的索引
+  var timeList = document.querySelector('ul.leftUl');
+  var timeIndex = -1;
+  if (timeList) {
+    var timeItems = Array.from(timeList.querySelectorAll('li'));
+    for (var i = 0; i < timeItems.length; i++) {
+      if (norm(timeItems[i].textContent) === norm(timeText)) {
+        timeIndex = i;
+        break;
       }
-      return isVisible(s);
-    });
-    debugInfo.push('level' + i + ':' + usableSeats.length + 'seats');
-    if (usableSeats.length > 0) {
-      lastSeats = usableSeats;
-      break;
     }
-    row = row.parentElement;
+    debugInfo.push('timeIdx=' + timeIndex);
   }
 
-  // 策略2: 如果没找到 seat，尝试查找 button（兼容其他页面结构）
+  // 2. 如果找到时间索引，在 .tables 中找对应的行
+  if (timeIndex >= 0) {
+    var tablesContainer = document.querySelector('.tables');
+    if (tablesContainer) {
+      var rows = Array.from(tablesContainer.querySelectorAll('.clearfix'));
+      debugInfo.push('totalRows=' + rows.length);
+
+      if (timeIndex < rows.length) {
+        var targetRow = rows[timeIndex];
+        var allSeats = Array.from(targetRow.querySelectorAll('.seat'));
+
+        // 过滤可用的场地
+        lastSeats = allSeats.filter(function (s) {
+          var innerSeat = s.querySelector('.inner-seat');
+          if (!innerSeat) return false;
+
+          // 检查是否是可选的（unselected-seat）
+          var className = innerSeat.className || '';
+          var isUnselected = /unselected/.test(className);
+          var isBought = /bought|disabled|unavailable/.test(className);
+
+          return isVisible(s) && isUnselected && !isBought;
+        });
+
+        debugInfo.push('row' + timeIndex + ':total=' + allSeats.length + ',available=' + lastSeats.length);
+      } else {
+        debugInfo.push('timeIndex=' + timeIndex + ' >= rows.length=' + rows.length);
+      }
+    }
+  }
+
+  // 备用策略：如果上面的方法失败，尝试传统的父节点遍历
   if (lastSeats.length === 0) {
-    row = tnode;
+    debugInfo.push('fallback-to-parent-search');
+    var row = tnode;
     for (var i = 0; i < 8; i += 1) {
       if (!row) break;
-      var btns = Array.from(row.querySelectorAll('button'));
-      var usable = btns.filter(function (b) { return isEnabled(b); });
-      debugInfo.push('btn-level' + i + ':' + usable.length);
-      if (usable.length > 0) {
-        lastSeats = usable;
+      var seats = Array.from(row.querySelectorAll('.seat'));
+      var usableSeats = seats.filter(function (s) {
+        var innerSeat = s.querySelector('.inner-seat');
+        if (!innerSeat) return false;
+        var className = innerSeat.className || '';
+        return isVisible(s) && /unselected/.test(className) && !/bought|disabled/.test(className);
+      });
+      debugInfo.push('fallback-level' + i + ':' + usableSeats.length);
+      if (usableSeats.length > 0) {
+        lastSeats = usableSeats;
         break;
       }
       row = row.parentElement;
     }
   }
 
-  // 策略3: 在时间节点的兄弟容器中查找
-  if (lastSeats.length === 0 && tnode.parentElement) {
-    var siblings = Array.from(tnode.parentElement.querySelectorAll('.seat, button'));
-    var usableSiblings = siblings.filter(function (el) {
-      if (el.classList.contains('seat')) {
-        var innerSeat = el.querySelector('.inner-seat');
-        return !innerSeat || !/bought|disabled/.test(innerSeat.className || '');
-      }
-      return isEnabled(el);
-    });
-    if (usableSiblings.length > 0) {
-      lastSeats = usableSiblings;
-      debugInfo.push('siblings:' + usableSiblings.length);
-    }
-  }
-
-  // 策略4: 查找时间节点之后的所有场地/按钮（直到下一个时间节点）
   if (lastSeats.length === 0) {
-    var allElements = Array.from(document.querySelectorAll('body *'));
-    var tnodeIndex = -1;
-    var nextTimeNodeIndex = allElements.length;
-
-    for (var j = 0; j < allElements.length; j++) {
-      if (allElements[j] === tnode) {
-        tnodeIndex = j;
-        for (var k = j + 1; k < allElements.length; k++) {
-          if (/^\d{1,2}:\d{2}$/.test((allElements[k].textContent || '').trim())) {
-            nextTimeNodeIndex = k;
-            break;
-          }
-        }
-        break;
-      }
-    }
-
-    if (tnodeIndex >= 0) {
-      var betweenEls = [];
-      for (var m = tnodeIndex + 1; m < nextTimeNodeIndex && m < allElements.length; m++) {
-        var el = allElements[m];
-        var isClickable = false;
-        if (el.classList && el.classList.contains('seat')) {
-          var innerSeat = el.querySelector('.inner-seat');
-          isClickable = !innerSeat || !/bought|disabled/.test(innerSeat.className || '');
-        } else if (el.tagName === 'BUTTON') {
-          isClickable = isEnabled(el);
-        }
-        if (isClickable) {
-          betweenEls.push(el);
-        }
-      }
-      if (betweenEls.length > 0) {
-        lastSeats = betweenEls;
-        debugInfo.push('between:' + betweenEls.length);
-      }
-    }
-  }
-
-  if (lastSeats.length === 0) {
-    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: 'no clickable elements - ' + debugInfo.join(',') });
+    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: 'no available seats - ' + debugInfo.join(',') });
     return;
   }
 
@@ -576,15 +549,13 @@ try {
 
   // 检查元素是否可点击
   var canClick = true;
-  if (targetEl.tagName === 'BUTTON') {
-    canClick = isEnabled(targetEl);
-  } else if (targetEl.classList && targetEl.classList.contains('seat')) {
+  if (targetEl.classList && targetEl.classList.contains('seat')) {
     var innerSeat = targetEl.querySelector('.inner-seat');
-    canClick = !innerSeat || !/bought|disabled/.test(innerSeat.className || '');
+    canClick = innerSeat && /unselected/.test(innerSeat.className || '');
   }
 
   if (!canClick) {
-    finish({ status: 'BUTTON_DISABLED', before: before, after: before, info: 'element not clickable, idx=' + idx });
+    finish({ status: 'BUTTON_DISABLED', before: before, after: before, info: 'seat not clickable, idx=' + idx + ' - ' + debugInfo.join(',') });
     return;
   }
 
@@ -600,7 +571,7 @@ try {
       status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT',
       before: before,
       after: after,
-      info: 'count=' + lastSeats.length + ' clickedIdx=' + idx + ' debug=' + debugInfo.join(',')
+      info: 'total=' + lastSeats.length + ' clickedIdx=' + idx + ' ' + debugInfo.join(',')
     });
   }, 500);
 } catch (err) {
