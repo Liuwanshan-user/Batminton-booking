@@ -43,11 +43,12 @@ from webdriver_manager.chrome import ChromeDriverManager
 class BookingConfig:
     start_url: str = "https://sports.sjtu.edu.cn/pc/?locale=zh#/"
     date_offset_days: int = 7
-    open_time_str: str = "20:54:40"
+    open_time_str: str = "23:25:40"
     preferred_slots: List[str] = None
     preferred_courts: List[int] = None
     click_retries: int = 3
     headless: bool = False
+    date_tab_wait_seconds: float = 45.0
 
     def with_defaults(self) -> "BookingConfig":
         """填充可变默认值，避免在 dataclass 定义时共享列表。"""
@@ -127,7 +128,7 @@ def next_open_time(s: str):
 def chinese_weekday(dt):
     return ["周一","周二","周三","周四","周五","周六","周日"][dt.weekday()]
 
-def click_date_tab(driver, target_date):
+def click_date_tab(driver, target_date, *, silent: bool = False):
     """更稳的中文日期匹配：10月31日、10月31日(周五)、10-31、2025-10-31 等。"""
     mm, dd, wd = target_date.month, target_date.day, chinese_weekday(target_date)
     candidates = [
@@ -154,7 +155,8 @@ def click_date_tab(driver, target_date):
             driver.execute_script("document.scrollingElement.scrollLeft += 320;")
         except Exception:
             pass
-    log("未找到目标日期页签。")
+    if not silent:
+        log("未找到目标日期页签。")
     return False
 
 # ---------- 关键：严格判断是否“真的选择成功/已下单成功” ----------
@@ -339,6 +341,38 @@ def wait_success_toast(driver, timeout=4):
     log("未检测到明确成功提示。最近页面文本片段：{}".format(last_text[:60].replace("\n"," ")))
     return False
 
+
+def ensure_date_tab(driver, target_date, wait_seconds: float) -> bool:
+    """在高并发时反复刷新页面直到目标日期可见。"""
+    deadline = time.time() + max(wait_seconds, 1.0)
+    attempt = 0
+    while True:
+        attempt += 1
+        silent = attempt > 1
+        if click_date_tab(driver, target_date, silent=silent):
+            if attempt > 1:
+                log(f"目标日期在第{attempt}次刷新后出现。")
+            return True
+
+        now = time.time()
+        if now >= deadline:
+            log("在设定的等待时长内仍未获取到目标日期页签。")
+            return False
+
+        remain = deadline - now
+        delay = min(0.6 + attempt * 0.4, 3.0, remain)
+        log(
+            "目标日期暂未开放，第{}次刷新，{:.1f}s 后重试（剩余{:.1f}s）。".format(
+                attempt, delay, remain
+            )
+        )
+        try:
+            driver.refresh()
+        except Exception as exc:
+            log(f"刷新页面失败：{exc}")
+        time.sleep(delay)
+
+
 def booking_flow(driver, config: BookingConfig):
     target_date = datetime.now(TZ) + timedelta(days=config.date_offset_days)
     log(
@@ -346,7 +380,7 @@ def booking_flow(driver, config: BookingConfig):
             target_date.strftime("%Y-%m-%d"), config.date_offset_days
         )
     )
-    if not click_date_tab(driver, target_date):
+    if not ensure_date_tab(driver, target_date, config.date_tab_wait_seconds):
         log("❌ 日期未选中，无法继续。")
         return
 
@@ -409,6 +443,12 @@ def parse_args(argv):
         help="点击失败重试次数 (默认: %(default)s)",
     )
     parser.add_argument(
+        "--date-tab-wait",
+        type=float,
+        default=default_config.date_tab_wait_seconds,
+        help="新日期开放后最多等待的秒数，会自动刷新页面 (默认: %(default)s)",
+    )
+    parser.add_argument(
         "--headless",
         dest="headless",
         action="store_true",
@@ -431,6 +471,7 @@ def parse_args(argv):
         preferred_courts=_split_list(args.courts, type_=int),
         click_retries=args.click_retries,
         headless=args.headless,
+        date_tab_wait_seconds=args.date_tab_wait,
     ).with_defaults()
     return args, config
 
@@ -450,6 +491,11 @@ def main(argv=None):
         else:
             target_dt = next_open_time(config.open_time_str)
             wait_until(target_dt)
+            try:
+                log("开放时间已到，主动刷新页面等待新日期放出……")
+                driver.refresh()
+            except Exception as exc:
+                log(f"刷新页面时遇到问题：{exc}")
             booking_flow(driver, config)
 
         log("完成，8 秒后关闭浏览器。")
