@@ -748,24 +748,21 @@ def click_submit_order_button(driver, timeout: float = 3.0) -> bool:
 def accept_booking_notice_if_present(driver, timeout: float = 4.0) -> bool:
     """若弹出“预订须知”提示框，则自动勾选并提交。"""
     end_time = time.time() + timeout
-    dialog_xpath = "//div[contains(@class, 'el-dialog') and .//span[contains(normalize-space(), '预订须知')]]"
-
     while time.time() < end_time:
         try:
-            dialogs = driver.find_elements(By.XPATH, dialog_xpath)
+            dialog = driver.find_element(
+                By.XPATH,
+                "//div[contains(@class, 'el-dialog') and .//span[contains(normalize-space(), '预订须知')]]",
+            )
         except Exception:
-            dialogs = []
+            # 未找到弹窗，视为无需处理
+            return True
 
-        dialog = None
-        for candidate in dialogs:
-            try:
-                if candidate.is_displayed():
-                    dialog = candidate
-                    break
-            except Exception:
+        try:
+            if not dialog.is_displayed():
+                time.sleep(0.1)
                 continue
-
-        if dialog is None:
+        except Exception:
             time.sleep(0.1)
             continue
 
@@ -808,9 +805,8 @@ def accept_booking_notice_if_present(driver, timeout: float = 4.0) -> bool:
             log("⚠ 未能在预订须知弹窗内点击提交订单。")
             return False
 
-    # 超时未检测到弹窗，视为无需处理
-    log("⏱ 未检测到预订须知弹窗，继续。")
-    return True
+    log("⚠ 处理预订须知弹窗超时。")
+    return False
 
 
 def confirm_if_needed(driver):
