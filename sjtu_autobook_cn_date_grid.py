@@ -46,8 +46,8 @@ class BookingConfig:
     start_url: str = "https://sports.sjtu.edu.cn/pc/?locale=zh#/"
     date_offset_days: int = 7
     open_time_str: str = "20:54:40"
-    venue_name: str = "气膜体育中心"
-    activity_name: str = "羽毛球"
+    venue_name: str = "南区体育馆"
+    activity_name: str = "乒乓球"
     preferred_slots: List[str] = None
     preferred_courts: List[int] = None
     click_retries: int = 3
@@ -543,6 +543,112 @@ def strict_select_slot(driver, time_text, court_index):
         log(f"JS 执行失败：{e}")
         return False
 
+
+def click_selected_court_icon(driver, time_text: str, court_index: int, timeout: float = 2.5) -> bool:
+    """在右侧订单面板中点击已选场地的图标/卡片，返回是否点击成功。"""
+    keywords = [
+        time_text,
+        f"第{court_index}",
+        f"{court_index}号",
+        f"{court_index}块",
+        f"场地{court_index}",
+        f"球场{court_index}",
+    ]
+    container_xpath = "//aside | //div[contains(@class,'order')] | //div[contains(@class,'right')] | //div[contains(@class,'detail')]"
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        try:
+            containers = driver.find_elements(By.XPATH, container_xpath)
+        except Exception:
+            containers = []
+        for container in containers:
+            try:
+                if not container.is_displayed():
+                    continue
+            except Exception:
+                pass
+            for key in keywords:
+                if not key:
+                    continue
+                try:
+                    el = container.find_element(
+                        By.XPATH, f".//*[contains(normalize-space(), '{key}')]"
+                    )
+                except Exception:
+                    continue
+
+                candidate = el
+                for _ in range(4):
+                    if candidate is None:
+                        break
+                    try:
+                        tag = candidate.tag_name.lower()
+                    except Exception:
+                        tag = ""
+                    try:
+                        displayed = candidate.is_displayed()
+                    except Exception:
+                        displayed = True
+                    if tag in {"button", "a", "li", "div", "span"} and displayed:
+                        try:
+                            driver.execute_script(
+                                "arguments[0].scrollIntoView({block:'center'});", candidate
+                            )
+                        except Exception:
+                            pass
+                        for action in (candidate.click, lambda e=candidate: driver.execute_script("arguments[0].click();", e)):
+                            try:
+                                action()
+                                log(f"已点击已选场地图标：{key}")
+                                return True
+                            except Exception:
+                                continue
+                    try:
+                        candidate = candidate.find_element(By.XPATH, "..")
+                    except Exception:
+                        candidate = None
+                # 若找到关键字但未成功点击，尝试下一个关键字
+        time.sleep(0.2)
+    log("❌ 未能点击已选场地图标，请检查右侧订单信息区域。")
+    return False
+
+
+def click_submit_order_button(driver, timeout: float = 3.0) -> bool:
+    """点击“立即下单/提交订单”等按钮。"""
+    labels = ["立即下单", "提交订单", "立即预约", "确认预约", "立即支付"]
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        for label in labels:
+            try:
+                buttons = driver.find_elements(
+                    By.XPATH, f"//button[contains(normalize-space(), '{label}')]"
+                )
+            except Exception:
+                buttons = []
+            for btn in buttons:
+                try:
+                    if not btn.is_displayed():
+                        continue
+                except Exception:
+                    pass
+                try:
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", btn
+                    )
+                except Exception:
+                    pass
+                for action in (btn.click, lambda b=btn: driver.execute_script("arguments[0].click();", b)):
+                    try:
+                        action()
+                        log(f"已点击下单按钮：{label}")
+                        return True
+                    except Exception:
+                        continue
+        time.sleep(0.2)
+    log("❌ 未能点击立即下单按钮。")
+    return False
+
+
 def confirm_if_needed(driver):
     """尝试点击确认/确定；若无弹窗则忽略"""
     try:
@@ -601,11 +707,18 @@ def booking_flow(driver, config: BookingConfig):
             if not ok:
                 continue
 
-            # 可能弹出确认
+            if not click_selected_court_icon(driver, t, c):
+                log("⚠ 未能激活右侧的已选场地，尝试下一组合。")
+                continue
+
+            if not click_submit_order_button(driver):
+                log("⚠ 未能点击立即下单按钮，尝试下一组合。")
+                continue
+
+            time.sleep(0.2)
             confirm_if_needed(driver)
 
-            # 严格等待“明确成功提示/右侧状态变化”
-            if wait_success_toast(driver, timeout=4):
+            if wait_success_toast(driver, timeout=6):
                 log(f"✅ {c}号场地{t}时间预约成功")
                 return
             else:
@@ -696,14 +809,13 @@ def main(argv=None):
             log(f"初始页面 URL：{driver.current_url}")
         except Exception:
             pass
-        log("请手动登录体育场馆系统，完成后按 Enter 继续（脚本会自动前往目标场馆/活动）。")
+        log("请手动登录体育场馆系统，完成后按 Enter 继续（脚本会在指定时间自动刷新并前往目标场馆/活动）。")
         input("登录完成后按 Enter ... ")
 
-        if not navigate_to_activity(driver, config, force_home=True):
-            log("❌ 初始导航失败，结束任务。")
-            return
-
         if args.now:
+            if not navigate_to_activity(driver, config, force_home=True):
+                log("❌ 无法自动跳转至目标场馆/活动，结束任务。")
+                return
             log("立即执行 (--now)")
             booking_flow(driver, config)
         else:
@@ -716,10 +828,12 @@ def main(argv=None):
                 log(f"刷新后当前 URL：{driver.current_url}")
             except Exception:
                 pass
-            log("🔄 页面刷新完成，重新跳转至目标场馆和活动。")
+            log("🔄 页面刷新完成，尝试自动跳转至目标场馆和活动。")
             if not navigate_to_activity(driver, config, force_home=False):
-                log("❌ 刷新后自动导航失败，结束任务。")
-                return
+                log("ℹ️ 当前页面未能直接进入目标场馆，尝试重新打开主页面。")
+                if not navigate_to_activity(driver, config, force_home=True):
+                    log("❌ 刷新后自动导航失败，结束任务。")
+                    return
             booking_flow(driver, config)
 
         log("完成，8 秒后关闭浏览器。")
