@@ -849,9 +849,9 @@ def booking_flow(driver, config: BookingConfig):
             if not ok:
                 continue
 
-            if not click_selected_court_icon(driver, t, c):
-                log("⚠ 未能激活右侧的已选场地，尝试下一组合。")
-                continue
+            # 选中座位后直接下单，不需要点击右侧图标
+            log(f"✅ 成功选中场地：{t} 第{c}块，准备下单")
+            time.sleep(0.3)  # 等待页面状态更新
 
             if not click_submit_order_button(driver):
                 log("⚠ 未能点击立即下单按钮，尝试下一组合。")
