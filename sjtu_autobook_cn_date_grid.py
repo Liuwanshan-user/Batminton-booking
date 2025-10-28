@@ -43,7 +43,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 class BookingConfig:
     start_url: str = "https://sports.sjtu.edu.cn/pc/?locale=zh#/"
     date_offset_days: int = 7
-    open_time_str: str = "20:54:40"
+    open_time_str: str = "23:25:40"
     preferred_slots: List[str] = None
     preferred_courts: List[int] = None
     click_retries: int = 3
