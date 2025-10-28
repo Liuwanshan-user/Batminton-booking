@@ -382,7 +382,7 @@ def click_date_tab(driver, target_date):
     log("未找到目标日期页签。")
     return False
 
-# ---------- 关键：严格判断是否“真的选择成功/已下单成功” ----------
+# ---------- 关键：严格判断是否"真的选择成功/已下单成功" ----------
 STRICT_CHECK_JS = r"""
 /*
   execute_async_script 回调版，返回 JSON 字符串或对象：
@@ -411,31 +411,20 @@ function finish(payload) {
 
 function norm(s) { return String(s || '').trim().replace(/\s+/g, ''); }
 function isVisible(el) { return !!(el && el.offsetParent !== null); }
-function isEnabled(btn) {
-  if (!btn) return false;
-  if (btn.disabled) return false;
-  var aria = btn.getAttribute('aria-disabled');
-  if (aria && aria.toString() === 'true') return false;
-  var cls = (btn.className || '').toString();
-  if (/disabled|不可|满|sold|unavailable/.test(cls)) return false;
-  return isVisible(btn);
-}
 
 function getPanelState() {
   var selectedCount = 0, amount = 0.0, submitEnabled = false;
   try {
-    // 更精确地提取"选中的X"，避免误匹配年份
     var t = document.body.innerText || '';
     var m1 = t.match(/选中的?[^\d]*?(\d+)(?:\s*个)?/);
     if (m1) {
       var num = parseInt(m1[1], 10);
-      // 过滤掉不合理的数字（如年份 2025）
       if (num >= 0 && num < 100) selectedCount = num;
     }
   } catch (err) {}
 
   try {
-    var textContainer = document.querySelector('aside, .right, .detail, .order');
+    var textContainer = document.querySelector('aside, .right, .detail, .order, .drawerStyle');
     var t2 = (textContainer || document.body).innerText || '';
     var m2 = t2.match(/[¥￥]\s*([0-9]+(\.[0-9]+)?)/) || t2.match(/([0-9]+(\.[0-9]+)?)\s*元/);
     if (m2) amount = parseFloat(m2[1]) || 0.0;
@@ -452,157 +441,131 @@ function getPanelState() {
   return { selectedCount: selectedCount, amount: amount, submitEnabled: submitEnabled };
 }
 
-function findTimeNode() {
-  var nodes = Array.from(document.querySelectorAll('body *'));
-  var timeNodes = nodes.filter(function (e) {
-    return /^\d{1,2}:\d{2}$/.test((e.textContent || '').trim());
-  });
-  return timeNodes.find(function (n) { return norm(n.textContent) === norm(timeText); }) || null;
-}
-
 try {
   var before = getPanelState();
-  var tnode = findTimeNode();
-  if (!tnode) {
-    finish({ status: 'TIME_NOT_FOUND', before: before, after: before, info: 'time label not found' });
+  var debugInfo = ['🔍 开始查找时间:' + timeText + ',场地:' + courtIndex];
+
+  // 新策略：处理左右分离的布局
+  // 1. 找到左侧时间列表 ul.leftUl
+  var leftUl = document.querySelector('ul.leftUl, ul.leftUl.fl');
+  if (!leftUl) {
+    finish({ status: 'TIME_NOT_FOUND', before: before, after: before, info: 'leftUl not found' });
     return;
   }
 
-  // 策略1: 查找 div.seat（实际的场地元素）
-  var row = tnode;
-  var lastSeats = [];
-  var debugInfo = [];
-
-  // 先尝试查找 div.seat 元素
-  for (var i = 0; i < 8; i += 1) {
-    if (!row) break;
-    var seats = Array.from(row.querySelectorAll('.seat'));
-    var usableSeats = seats.filter(function (s) {
-      // 排除已被购买的场地（bought-seat class）
-      var innerSeat = s.querySelector('.inner-seat');
-      if (innerSeat && /bought|disabled|unavailable|满/.test(innerSeat.className || '')) {
-        return false;
-      }
-      return isVisible(s);
-    });
-    debugInfo.push('level' + i + ':' + usableSeats.length + 'seats');
-    if (usableSeats.length > 0) {
-      lastSeats = usableSeats;
+  // 2. 在左侧列表中找到对应时间的索引
+  var timeItems = Array.from(leftUl.querySelectorAll('li'));
+  var timeIndex = -1;
+  for (var i = 0; i < timeItems.length; i++) {
+    if (norm(timeItems[i].textContent) === norm(timeText)) {
+      timeIndex = i;
       break;
     }
-    row = row.parentElement;
   }
 
-  // 策略2: 如果没找到 seat，尝试查找 button（兼容其他页面结构）
-  if (lastSeats.length === 0) {
-    row = tnode;
-    for (var i = 0; i < 8; i += 1) {
-      if (!row) break;
-      var btns = Array.from(row.querySelectorAll('button'));
-      var usable = btns.filter(function (b) { return isEnabled(b); });
-      debugInfo.push('btn-level' + i + ':' + usable.length);
-      if (usable.length > 0) {
-        lastSeats = usable;
-        break;
-      }
-      row = row.parentElement;
-    }
-  }
-
-  // 策略3: 在时间节点的兄弟容器中查找
-  if (lastSeats.length === 0 && tnode.parentElement) {
-    var siblings = Array.from(tnode.parentElement.querySelectorAll('.seat, button'));
-    var usableSiblings = siblings.filter(function (el) {
-      if (el.classList.contains('seat')) {
-        var innerSeat = el.querySelector('.inner-seat');
-        return !innerSeat || !/bought|disabled/.test(innerSeat.className || '');
-      }
-      return isEnabled(el);
-    });
-    if (usableSiblings.length > 0) {
-      lastSeats = usableSiblings;
-      debugInfo.push('siblings:' + usableSiblings.length);
-    }
-  }
-
-  // 策略4: 查找时间节点之后的所有场地/按钮（直到下一个时间节点）
-  if (lastSeats.length === 0) {
-    var allElements = Array.from(document.querySelectorAll('body *'));
-    var tnodeIndex = -1;
-    var nextTimeNodeIndex = allElements.length;
-
-    for (var j = 0; j < allElements.length; j++) {
-      if (allElements[j] === tnode) {
-        tnodeIndex = j;
-        for (var k = j + 1; k < allElements.length; k++) {
-          if (/^\d{1,2}:\d{2}$/.test((allElements[k].textContent || '').trim())) {
-            nextTimeNodeIndex = k;
-            break;
-          }
-        }
-        break;
-      }
-    }
-
-    if (tnodeIndex >= 0) {
-      var betweenEls = [];
-      for (var m = tnodeIndex + 1; m < nextTimeNodeIndex && m < allElements.length; m++) {
-        var el = allElements[m];
-        var isClickable = false;
-        if (el.classList && el.classList.contains('seat')) {
-          var innerSeat = el.querySelector('.inner-seat');
-          isClickable = !innerSeat || !/bought|disabled/.test(innerSeat.className || '');
-        } else if (el.tagName === 'BUTTON') {
-          isClickable = isEnabled(el);
-        }
-        if (isClickable) {
-          betweenEls.push(el);
-        }
-      }
-      if (betweenEls.length > 0) {
-        lastSeats = betweenEls;
-        debugInfo.push('between:' + betweenEls.length);
-      }
-    }
-  }
-
-  if (lastSeats.length === 0) {
-    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: 'no clickable elements - ' + debugInfo.join(',') });
+  if (timeIndex === -1) {
+    debugInfo.push('❌ 在左侧时间列表中未找到时间:' + timeText);
+    finish({ status: 'TIME_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
     return;
   }
 
-  var idx = Math.min(lastSeats.length, courtIndex) - 1;
-  var targetEl = lastSeats[idx];
+  debugInfo.push('✓ 找到时间索引:' + timeIndex + '/' + timeItems.length);
 
-  // 检查元素是否可点击
-  var canClick = true;
-  if (targetEl.tagName === 'BUTTON') {
-    canClick = isEnabled(targetEl);
-  } else if (targetEl.classList && targetEl.classList.contains('seat')) {
-    var innerSeat = targetEl.querySelector('.inner-seat');
-    canClick = !innerSeat || !/bought|disabled/.test(innerSeat.className || '');
-  }
-
-  if (!canClick) {
-    finish({ status: 'BUTTON_DISABLED', before: before, after: before, info: 'element not clickable, idx=' + idx });
+  // 3. 找到右侧座位容器
+  var tablesDiv = document.querySelector('div.tables, div.tables.fl');
+  if (!tablesDiv) {
+    debugInfo.push('❌ 未找到座位容器 div.tables');
+    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
     return;
   }
 
-  targetEl.scrollIntoView({ block: 'center' });
-  targetEl.click();
+  // 4. 获取所有座位行（每个 div.clearfix 是一行）
+  var seatRows = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
+  debugInfo.push('✓ 找到座位行数:' + seatRows.length);
 
+  if (timeIndex >= seatRows.length) {
+    debugInfo.push('❌ 时间索引超出座位行范围:' + timeIndex + '>=' + seatRows.length);
+    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
+    return;
+  }
+
+  // 5. 获取对应时间行的所有座位
+  var targetRow = seatRows[timeIndex];
+  var allSeats = Array.from(targetRow.querySelectorAll('div.seat'));
+  debugInfo.push('✓ 该行座位总数:' + allSeats.length);
+
+  // 6. 过滤出可用座位（排除 bought-seat）
+  var availableSeats = [];
+  var boughtCount = 0;
+  var unselectedCount = 0;
+
+  for (var j = 0; j < allSeats.length; j++) {
+    var seat = allSeats[j];
+    var innerSeat = seat.querySelector('.inner-seat');
+    if (!innerSeat) continue;
+
+    var innerClass = innerSeat.className || '';
+
+    if (/bought-seat|bought|已购|已订/.test(innerClass)) {
+      boughtCount++;
+      continue;
+    }
+
+    if (/unselected-seat|available|可选|空闲/.test(innerClass) && isVisible(seat)) {
+      availableSeats.push(seat);
+      unselectedCount++;
+    }
+  }
+
+  debugInfo.push('📊 座位统计: 总数=' + allSeats.length + ',已订=' + boughtCount + ',可选=' + unselectedCount);
+
+  if (availableSeats.length === 0) {
+    debugInfo.push('❌ 该时段无可用座位');
+    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
+    return;
+  }
+
+  // 7. 选择目标座位（courtIndex 从1开始）
+  var targetSeatIndex = Math.min(availableSeats.length, courtIndex) - 1;
+  var targetSeat = availableSeats[targetSeatIndex];
+
+  debugInfo.push('🎯 选择第' + courtIndex + '个可用座位(索引:' + targetSeatIndex + ')');
+
+  // 8. 点击座位
+  try {
+    targetSeat.scrollIntoView({ block: 'center' });
+    targetSeat.click();
+    debugInfo.push('✓ 已点击座位');
+  } catch (err) {
+    try {
+      // 尝试点击内部元素
+      var innerSeat = targetSeat.querySelector('.inner-seat');
+      if (innerSeat) {
+        innerSeat.click();
+        debugInfo.push('✓ 已点击座位(inner)');
+      }
+    } catch (err2) {
+      debugInfo.push('❌ 点击失败:' + err2);
+    }
+  }
+
+  // 9. 等待状态变化并检查结果
   window.setTimeout(function () {
     var after = getPanelState();
     var changed = (after.selectedCount > before.selectedCount) ||
       (after.amount > before.amount) ||
       (!before.submitEnabled && after.submitEnabled);
+
+    debugInfo.push('📈 状态: 选中' + before.selectedCount + '->' + after.selectedCount +
+                   ', 金额' + before.amount + '->' + after.amount);
+
     finish({
       status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT',
       before: before,
       after: after,
-      info: 'count=' + lastSeats.length + ' clickedIdx=' + idx + ' debug=' + debugInfo.join(',')
+      info: debugInfo.join(' | ')
     });
-  }, 500);
+  }, 600);
 } catch (err) {
   var info = '';
   try {
@@ -615,7 +578,7 @@ try {
 """
 
 def strict_select_slot(driver, time_text, court_index, config=None):
-    """用 JS 执行严格选择；返回 True 表示"选择产生了实际效果""""
+    """用 JS 执行严格选择；返回 True 表示"选择产生了实际效果" """
     try:
         raw = driver.execute_async_script(STRICT_CHECK_JS, time_text, court_index)
         if isinstance(raw, str):
