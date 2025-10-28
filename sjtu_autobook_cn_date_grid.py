@@ -531,33 +531,79 @@ try {
 
   debugInfo.push('🎯 选择第' + courtIndex + '个可用座位(索引:' + targetSeatIndex + ')');
 
-  // 8. 点击座位
-  try {
-    targetSeat.scrollIntoView({ block: 'center' });
-    targetSeat.click();
-    debugInfo.push('✓ 已点击座位');
-  } catch (err) {
-    try {
-      // 尝试点击内部元素
+  // 8. 尝试多种方式点击座位
+  targetSeat.scrollIntoView({ block: 'center' });
+
+  var clickSuccess = false;
+  var clickMethods = [
+    // 方法1: 点击内部的 inner-seat
+    function() {
       var innerSeat = targetSeat.querySelector('.inner-seat');
       if (innerSeat) {
         innerSeat.click();
-        debugInfo.push('✓ 已点击座位(inner)');
+        return 'inner-seat.click()';
       }
-    } catch (err2) {
-      debugInfo.push('❌ 点击失败:' + err2);
+      return null;
+    },
+    // 方法2: 点击 seat 本身
+    function() {
+      targetSeat.click();
+      return 'seat.click()';
+    },
+    // 方法3: JavaScript点击 inner-seat
+    function() {
+      var innerSeat = targetSeat.querySelector('.inner-seat');
+      if (innerSeat) {
+        var evt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+        innerSeat.dispatchEvent(evt);
+        return 'inner-seat.dispatchEvent(click)';
+      }
+      return null;
+    },
+    // 方法4: JavaScript点击 seat
+    function() {
+      var evt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+      targetSeat.dispatchEvent(evt);
+      return 'seat.dispatchEvent(click)';
+    },
+    // 方法5: 点击最内层的div
+    function() {
+      var innerDiv = targetSeat.querySelector('.inner-seat > div');
+      if (innerDiv) {
+        innerDiv.click();
+        return 'inner-div.click()';
+      }
+      return null;
+    }
+  ];
+
+  for (var m = 0; m < clickMethods.length; m++) {
+    try {
+      var methodName = clickMethods[m]();
+      if (methodName) {
+        debugInfo.push('🖱️ 尝试点击方法' + (m+1) + ':' + methodName);
+        clickSuccess = true;
+        break;
+      }
+    } catch (err) {
+      debugInfo.push('⚠️ 方法' + (m+1) + '失败:' + err.message);
     }
   }
 
-  // 9. 等待状态变化并检查结果
+  if (!clickSuccess) {
+    debugInfo.push('❌ 所有点击方法都失败');
+  }
+
+  // 9. 等待更长时间让状态变化
   window.setTimeout(function () {
     var after = getPanelState();
     var changed = (after.selectedCount > before.selectedCount) ||
       (after.amount > before.amount) ||
       (!before.submitEnabled && after.submitEnabled);
 
-    debugInfo.push('📈 状态: 选中' + before.selectedCount + '->' + after.selectedCount +
-                   ', 金额' + before.amount + '->' + after.amount);
+    debugInfo.push('📈 状态变化: 选中' + before.selectedCount + '->' + after.selectedCount +
+                   ', 金额￥' + before.amount + '->￥' + after.amount +
+                   ', 按钮' + (before.submitEnabled?'已启用':'未启用') + '->' + (after.submitEnabled?'已启用':'未启用'));
 
     finish({
       status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT',
@@ -565,7 +611,7 @@ try {
       after: after,
       info: debugInfo.join(' | ')
     });
-  }, 600);
+  }, 800);
 } catch (err) {
   var info = '';
   try {
