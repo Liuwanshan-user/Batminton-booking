@@ -11,6 +11,7 @@ SJTU Sports Auto-Booker — Manual Login + No-Label Grid (Strict Success Check)
    - 指定日期偏移/时间段：python this_script.py --date-offset 6 --slots "18:00,19:00" --courts "2,3"
    - 等到 12:00：python this_script.py
 3) 脚本会在目标时间自动：
+   - 根据配置重新打开主站并导航到指定场馆/活动（默认：气膜体育中心 → 羽毛球）
    - 选择“今天 + DATE_OFFSET_DAYS”的日期页签
    - 遍历 PREFERRED_SLOTS（时间行）与 PREFERRED_COURTS（该行第 N 块）尝试点击
    - 若出现确认弹窗会点“确认/确定”
@@ -31,6 +32,7 @@ from typing import Iterable, List
 
 import pytz
 from selenium import webdriver
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
@@ -44,6 +46,8 @@ class BookingConfig:
     start_url: str = "https://sports.sjtu.edu.cn/pc/?locale=zh#/"
     date_offset_days: int = 7
     open_time_str: str = "20:54:40"
+    venue_name: str = "南区体育馆"
+    activity_name: str = "乒乓球"
     preferred_slots: List[str] = None
     preferred_courts: List[int] = None
     click_retries: int = 3
@@ -87,6 +91,226 @@ def _positive_int(value: str) -> int:
 
 def log(m):
     print(f"[{datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}] {m}", flush=True)
+
+
+def wait_document_ready(driver, timeout=12):
+    try:
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+        return True
+    except TimeoutException:
+        log("⚠ 页面在指定时间内未完全加载。")
+        return False
+
+
+def is_on_grid_page(driver) -> bool:
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+    except Exception:
+        body_text = driver.page_source
+    keywords = ["选中的", "立即下单", "预约", "金额"]
+    return any(k in body_text for k in keywords)
+
+
+def wait_for_grid_ready(driver, timeout=12):
+    keywords = ["选中的", "立即下单", "预约", "金额"]
+    try:
+        WebDriverWait(driver, timeout).until(
+            lambda d: any(k in (d.page_source or "") for k in keywords)
+        )
+        log("✅ 检测到预约页面关键字，认为已到达网格页面。")
+        return True
+    except TimeoutException:
+        log("⚠ 未能在限定时间内确认预约网格加载完成。")
+        return False
+
+
+def _click_element_by_text(driver, target_text: str, description: str, timeout=10):
+    if not target_text:
+        return True
+    log(f"查找{description}：{target_text}")
+    xpaths = [
+        f"//button[normalize-space()='{target_text}']",
+        f"//a[normalize-space()='{target_text}']",
+        f"//span[normalize-space()='{target_text}']",
+        f"//div[normalize-space()='{target_text}']",
+        f"//h3[contains(normalize-space(), '{target_text}')]",
+        f"//*[@role='tab' and contains(normalize-space(), '{target_text}')]",
+        f"//*[@role='button' and contains(normalize-space(), '{target_text}')]",
+        f"//p[contains(normalize-space(), '{target_text}')]",
+    ]
+    end = time.time() + timeout
+    while time.time() < end:
+        for xp in xpaths:
+            try:
+                elements = driver.find_elements(By.XPATH, xp)
+            except Exception:
+                continue
+            for el in elements:
+                try:
+                    if not el.is_displayed():
+                        continue
+                except StaleElementReferenceException:
+                    continue
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                except Exception:
+                    pass
+                try:
+                    el.click()
+                except Exception:
+                    try:
+                        driver.execute_script("arguments[0].click();", el)
+                    except Exception:
+                        continue
+                log(f"已点击{description}：{target_text}")
+                time.sleep(0.4)
+                return True
+        time.sleep(0.3)
+    log(f"❌ 未能点击{description}：{target_text}")
+    return False
+
+
+def _click_card_heading(driver, heading_text: str, description: str, timeout=10):
+    if not heading_text:
+        return True
+    try:
+        heading = WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located(
+                (By.XPATH, f"//h3[contains(normalize-space(), '{heading_text}')]" )
+            )
+        )
+    except TimeoutException:
+        log(f"❌ 未找到{description}卡片：{heading_text}")
+        return False
+
+    try:
+        container = heading.find_element(By.XPATH, "./ancestor::*[contains(@class, 'el-card')][1]")
+    except Exception:
+        try:
+            container = heading.find_element(By.XPATH, "./ancestor::li[1]")
+        except Exception:
+            container = heading
+
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", container)
+
+    candidates = []
+    try:
+        candidates.extend(container.find_elements(By.CSS_SELECTOR, "a,button"))
+    except Exception:
+        pass
+    candidates.append(container)
+    if heading not in candidates:
+        candidates.append(heading)
+
+    for el in candidates:
+        try:
+            if not el.is_displayed():
+                continue
+        except Exception:
+            pass
+        for clicker in (el.click, lambda e=el: driver.execute_script("arguments[0].click();", e)):
+            try:
+                clicker()
+                log(f"已点击{description}卡片：{heading_text}")
+                return True
+            except Exception:
+                continue
+
+    log(f"❌ 无法点击{description}卡片：{heading_text}")
+    return False
+
+
+def _search_and_click_card(driver, keyword: str) -> bool:
+    if not keyword:
+        return True
+    log(f"使用搜索定位场馆：{keyword}")
+    try:
+        search_input = WebDriverWait(driver, 6).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "input[placeholder*='场馆名称']"))
+        )
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", search_input)
+        try:
+            search_input.clear()
+        except Exception:
+            driver.execute_script("arguments[0].value='';", search_input)
+        search_input.send_keys(keyword)
+        try:
+            search_btn = search_input.find_element(By.XPATH, "../../div[@class='el-input-group__append']//button")
+        except Exception:
+            search_btn = driver.find_element(By.CSS_SELECTOR, ".searchInput button")
+        search_btn.click()
+        time.sleep(0.6)
+    except Exception as exc:
+        log(f"❌ 搜索框操作失败：{exc}")
+        return False
+
+    return _click_card_heading(driver, keyword, "场馆")
+
+
+def _switch_to_new_window(driver, previous_handles):
+    try:
+        current_handles = driver.window_handles
+    except Exception:
+        return False
+    for handle in current_handles:
+        if handle not in previous_handles:
+            driver.switch_to.window(handle)
+            return True
+    return False
+
+
+def navigate_to_activity(driver, config: BookingConfig, *, force_home=False) -> bool:
+    if is_on_grid_page(driver):
+        log("检测到当前已在预约网格页面。")
+        return True
+
+    def _navigate_from_current_page():
+        if is_on_grid_page(driver):
+            return True
+        handles_before = list(driver.window_handles)
+        if not (
+            _click_element_by_text(driver, config.venue_name, "场馆")
+            or _click_card_heading(driver, config.venue_name, "场馆")
+            or _search_and_click_card(driver, config.venue_name)
+        ):
+            return False
+        time.sleep(0.8)
+        if _switch_to_new_window(driver, handles_before):
+            wait_document_ready(driver, timeout=12)
+        if config.activity_name and not _click_element_by_text(driver, config.activity_name, "活动"):
+            return False
+        wait_for_grid_ready(driver, timeout=12)
+        return is_on_grid_page(driver)
+
+    if force_home:
+        log(f"打开预约主页面：{config.start_url}")
+        driver.get(config.start_url)
+        wait_document_ready(driver, timeout=12)
+        try:
+            driver.switch_to.window(driver.window_handles[-1])
+        except Exception:
+            pass
+
+    if _navigate_from_current_page():
+        log(f"✅ 已导航到目标页面：{config.venue_name} → {config.activity_name}")
+        return True
+
+    log("当前页面未找到目标场馆/活动，尝试返回主页面重新定位。")
+    driver.get(config.start_url)
+    wait_document_ready(driver, timeout=12)
+    try:
+        driver.switch_to.window(driver.window_handles[-1])
+    except Exception:
+        pass
+    if _navigate_from_current_page():
+        log(f"✅ 已导航到目标页面：{config.venue_name} → {config.activity_name}")
+        return True
+
+    log("❌ 自动导航到目标场馆/活动失败，请手动检查页面。")
+    return False
+
 
 def build_driver(config: BookingConfig):
     opts = Options()
@@ -160,134 +384,148 @@ def click_date_tab(driver, target_date):
 # ---------- 关键：严格判断是否“真的选择成功/已下单成功” ----------
 STRICT_CHECK_JS = r"""
 /*
- 返回 JSON 字符串，对应字典结构：
- {
-   status: "OK_SELECTED" | "TIME_NOT_FOUND" | "ROW_OR_BUTTON_NOT_FOUND" | "CLICK_NO_EFFECT" | "BUTTON_DISABLED",
-   before: { selectedCount, amount, submitEnabled },
-   after:  { selectedCount, amount, submitEnabled },
-   info: "extra text"
- }
- 逻辑：
- 1) 找到左侧时间标签（精确等于 HH:MM）。
- 2) 向上聚合到整行，取其中第 courtIndex 个“可点击且可见”的按钮（排除 disabled/aria-disabled/不可见）。
- 3) 记录点击前的“右侧选中数量/金额/下单按钮可用状态”，点击，再记录点击后的差异。
- 4) 只有当 after.selectedCount > before 或 after.amount > before.amount 或 submitEnabled 由 False->True
-    才视为 “OK_SELECTED”。否则 CLICK_NO_EFFECT。
+  execute_async_script 回调版，返回 JSON 字符串或对象：
+  {
+    status: "OK_SELECTED" | "TIME_NOT_FOUND" | "ROW_OR_BUTTON_NOT_FOUND" | "CLICK_NO_EFFECT" | "BUTTON_DISABLED" | "JS_EXCEPTION",
+    before: { selectedCount, amount, submitEnabled },
+    after:  { selectedCount, amount, submitEnabled },
+    info: "extra text"
+  }
 */
-(function(){
-  const timeText = arguments[0];
-  const courtIndex = Math.max(1, parseInt(arguments[1]||1));
+var timeText = arguments[0];
+var courtIndex = Math.max(1, parseInt(arguments[1] || 1, 10));
+var done = arguments[arguments.length - 1];
 
-  function norm(s){ return String(s||'').trim().replace(/\s+/g,''); }
-  function isVisible(el){ return !!(el && el.offsetParent !== null); }
-  function isEnabled(btn){
-    if(!btn) return false;
-    if(btn.disabled) return false;
-    const aria = btn.getAttribute('aria-disabled');
-    if(aria && aria.toString() === 'true') return false;
-    const cls = (btn.className||'').toString();
-    if(/disabled|不可|满|sold|unavailable/.test(cls)) return false;
-    return isVisible(btn);
+function finish(payload) {
+  try {
+    done(JSON.stringify(payload));
+  } catch (err) {
+    try {
+      done(payload);
+    } catch (_) {
+      done(null);
+    }
+  }
+}
+
+function norm(s) { return String(s || '').trim().replace(/\s+/g, ''); }
+function isVisible(el) { return !!(el && el.offsetParent !== null); }
+function isEnabled(btn) {
+  if (!btn) return false;
+  if (btn.disabled) return false;
+  var aria = btn.getAttribute('aria-disabled');
+  if (aria && aria.toString() === 'true') return false;
+  var cls = (btn.className || '').toString();
+  if (/disabled|不可|满|sold|unavailable/.test(cls)) return false;
+  return isVisible(btn);
+}
+
+function getPanelState() {
+  var selectedCount = 0, amount = 0.0, submitEnabled = false;
+  try {
+    var t = document.body.innerText || '';
+    var m1 = t.match(/选中的?\D*(\d+)/);
+    if (m1) selectedCount = parseInt(m1[1], 10) || 0;
+  } catch (err) {}
+
+  try {
+    var textContainer = document.querySelector('aside, .right, .detail, .order');
+    var t2 = (textContainer || document.body).innerText || '';
+    var m2 = t2.match(/[¥￥]\s*([0-9]+(\.[0-9]+)?)/) || t2.match(/([0-9]+(\.[0-9]+)?)\s*元/);
+    if (m2) amount = parseFloat(m2[1]) || 0.0;
+  } catch (err) {}
+
+  try {
+    var btns = Array.from(document.querySelectorAll('button')).filter(function (b) {
+      return /下单|预约|提交|支付/.test((b.textContent || ''));
+    });
+    var btn = btns[0];
+    submitEnabled = !!(btn && !btn.disabled && btn.offsetParent !== null);
+  } catch (err) {}
+
+  return { selectedCount: selectedCount, amount: amount, submitEnabled: submitEnabled };
+}
+
+function findTimeNode() {
+  var nodes = Array.from(document.querySelectorAll('body *'));
+  var timeNodes = nodes.filter(function (e) {
+    return /^\d{1,2}:\d{2}$/.test((e.textContent || '').trim());
+  });
+  return timeNodes.find(function (n) { return norm(n.textContent) === norm(timeText); }) || null;
+}
+
+try {
+  var before = getPanelState();
+  var tnode = findTimeNode();
+  if (!tnode) {
+    finish({ status: 'TIME_NOT_FOUND', before: before, after: before, info: 'time label not found' });
+    return;
   }
 
-  function getPanelState(){
-    // 尝试抓右侧信息：选中数量、金额、下单按钮状态
-    let selectedCount = 0, amount = 0.0, submitEnabled = false;
-
-    // 1) 选中数量（寻找“选中的/合计/已选”等容器的数字）
-    try{
-      const t = document.body.innerText || '';
-      const m1 = t.match(/选中的?\D*(\d+)/);
-      if(m1) selectedCount = parseInt(m1[1],10) || 0;
-    }catch(err){
-      // ignore
+  var row = tnode;
+  var lastBtns = [];
+  for (var i = 0; i < 8; i += 1) {
+    if (!row) break;
+    var btns = Array.from(row.querySelectorAll('button'));
+    var usable = btns.filter(function (b) { return isEnabled(b); });
+    if (usable.length > 0) {
+      lastBtns = usable;
+      break;
     }
-
-    // 2) 金额（匹配形如 ¥12 或 ￥12 或 12元）
-    try{
-      const t = (document.querySelector('aside, .right, .detail, .order')||document.body).innerText || '';
-      const m2 = t.match(/[¥￥]\s*([0-9]+(\.[0-9]+)?)/) || t.match(/([0-9]+(\.[0-9]+)?)\s*元/);
-      if(m2) amount = parseFloat(m2[1]) || 0.0;
-    }catch(err){
-      // ignore
-    }
-
-    // 3) 立即下单按钮是否可点
-    try{
-      const btns = Array.from(document.querySelectorAll('button')).filter(b => /下单|预约|提交|支付/.test(b.textContent||''));
-      const btn = btns[0];
-      submitEnabled = !!(btn && !btn.disabled && btn.offsetParent !== null);
-    }catch(err){
-      // ignore
-    }
-
-    return {selectedCount, amount, submitEnabled};
+    row = row.parentElement;
+  }
+  if (lastBtns.length === 0) {
+    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: 'no clickable buttons in row' });
+    return;
   }
 
-  function findTimeNode(){
-    const nodes = Array.from(document.querySelectorAll('body *'));
-    const timeNodes = nodes.filter(e => /^\d{1,2}:\d{2}$/.test((e.textContent||'').trim()));
-    return timeNodes.find(n => norm(n.textContent) === norm(timeText)) || null;
+  var idx = Math.min(lastBtns.length, courtIndex) - 1;
+  var btn = lastBtns[idx];
+  if (!isEnabled(btn)) {
+    finish({ status: 'BUTTON_DISABLED', before: before, after: before, info: 'button disabled' });
+    return;
   }
 
-  try{
-    const before = getPanelState();
-    const tnode = findTimeNode();
-    if(!tnode) return JSON.stringify({status:'TIME_NOT_FOUND', before, after:before, info:'time label not found'});
+  btn.scrollIntoView({ block: 'center' });
+  btn.click();
 
-    // 聚合到包含多个按钮的行
-    let row = tnode;
-    let lastBtns = [];
-    for(let i=0;i<8;i++){
-      if(!row) break;
-      const btns = Array.from(row.querySelectorAll('button'));
-      const usable = btns.filter(b => isEnabled(b));
-      if(usable.length > 0){
-        lastBtns = usable;
-        break;
-      }
-      row = row.parentElement;
-    }
-    if(lastBtns.length === 0){
-      return JSON.stringify({status:'ROW_OR_BUTTON_NOT_FOUND', before, after:before, info:'no clickable buttons in row'});
-    }
-    const idx = Math.min(lastBtns.length, courtIndex) - 1;
-    const btn = lastBtns[idx];
-    if(!isEnabled(btn)) return JSON.stringify({status:'BUTTON_DISABLED', before, after:before, info:'button disabled'});
-
-    // 点击
-    btn.scrollIntoView({block:'center'});
-    btn.click();
-
-    // 等待UI反应
-    const t0 = performance.now();
-    while(performance.now() - t0 < 1200){
-      // 轻微延时
-      // eslint-disable-next-line no-empty
-    }
-    const after = getPanelState();
-
-    // 判断是否“真的产生了选择效果”
-    const changed = (after.selectedCount > before.selectedCount) || (after.amount > before.amount) || (!before.submitEnabled && after.submitEnabled);
-    return JSON.stringify({status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT', before, after, info:`btnCount=${lastBtns.length}`});
-  }catch(err){
-    let info = '';
-    try{
-      info = err && (err.stack || err.message || String(err));
-    }catch(_){
-      info = String(err);
-    }
-    return JSON.stringify({status:'JS_EXCEPTION', before:null, after:null, info});
+  window.setTimeout(function () {
+    var after = getPanelState();
+    var changed = (after.selectedCount > before.selectedCount) ||
+      (after.amount > before.amount) ||
+      (!before.submitEnabled && after.submitEnabled);
+    finish({
+      status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT',
+      before: before,
+      after: after,
+      info: 'btnCount=' + lastBtns.length
+    });
+  }, 500);
+} catch (err) {
+  var info = '';
+  try {
+    info = err && (err.stack || err.message || String(err));
+  } catch (_) {
+    info = String(err);
   }
-})();
+  finish({ status: 'JS_EXCEPTION', before: null, after: null, info: info });
+}
 """
 
 def strict_select_slot(driver, time_text, court_index):
     """用 JS 执行严格选择；返回 True 表示“选择产生了实际效果”"""
     try:
-        res = driver.execute_script(STRICT_CHECK_JS, time_text, court_index)
-        if not isinstance(res, dict):
-            log(f"JS 返回异常：{res!r}")
+        raw = driver.execute_async_script(STRICT_CHECK_JS, time_text, court_index)
+        if isinstance(raw, str):
+            try:
+                res = json.loads(raw)
+            except Exception as exc:
+                log(f"JS 返回内容无法解析：{raw!r} ({exc})")
+                return False
+        elif isinstance(raw, dict):
+            res = raw
+        else:
+            log(f"JS 返回异常：{raw!r}")
             return False
         status = res.get("status")
         log(
@@ -304,6 +542,112 @@ def strict_select_slot(driver, time_text, court_index):
     except Exception as e:
         log(f"JS 执行失败：{e}")
         return False
+
+
+def click_selected_court_icon(driver, time_text: str, court_index: int, timeout: float = 2.5) -> bool:
+    """在右侧订单面板中点击已选场地的图标/卡片，返回是否点击成功。"""
+    keywords = [
+        time_text,
+        f"第{court_index}",
+        f"{court_index}号",
+        f"{court_index}块",
+        f"场地{court_index}",
+        f"球场{court_index}",
+    ]
+    container_xpath = "//aside | //div[contains(@class,'order')] | //div[contains(@class,'right')] | //div[contains(@class,'detail')]"
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        try:
+            containers = driver.find_elements(By.XPATH, container_xpath)
+        except Exception:
+            containers = []
+        for container in containers:
+            try:
+                if not container.is_displayed():
+                    continue
+            except Exception:
+                pass
+            for key in keywords:
+                if not key:
+                    continue
+                try:
+                    el = container.find_element(
+                        By.XPATH, f".//*[contains(normalize-space(), '{key}')]"
+                    )
+                except Exception:
+                    continue
+
+                candidate = el
+                for _ in range(4):
+                    if candidate is None:
+                        break
+                    try:
+                        tag = candidate.tag_name.lower()
+                    except Exception:
+                        tag = ""
+                    try:
+                        displayed = candidate.is_displayed()
+                    except Exception:
+                        displayed = True
+                    if tag in {"button", "a", "li", "div", "span"} and displayed:
+                        try:
+                            driver.execute_script(
+                                "arguments[0].scrollIntoView({block:'center'});", candidate
+                            )
+                        except Exception:
+                            pass
+                        for action in (candidate.click, lambda e=candidate: driver.execute_script("arguments[0].click();", e)):
+                            try:
+                                action()
+                                log(f"已点击已选场地图标：{key}")
+                                return True
+                            except Exception:
+                                continue
+                    try:
+                        candidate = candidate.find_element(By.XPATH, "..")
+                    except Exception:
+                        candidate = None
+                # 若找到关键字但未成功点击，尝试下一个关键字
+        time.sleep(0.2)
+    log("❌ 未能点击已选场地图标，请检查右侧订单信息区域。")
+    return False
+
+
+def click_submit_order_button(driver, timeout: float = 3.0) -> bool:
+    """点击“立即下单/提交订单”等按钮。"""
+    labels = ["立即下单", "提交订单", "立即预约", "确认预约", "立即支付"]
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        for label in labels:
+            try:
+                buttons = driver.find_elements(
+                    By.XPATH, f"//button[contains(normalize-space(), '{label}')]"
+                )
+            except Exception:
+                buttons = []
+            for btn in buttons:
+                try:
+                    if not btn.is_displayed():
+                        continue
+                except Exception:
+                    pass
+                try:
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", btn
+                    )
+                except Exception:
+                    pass
+                for action in (btn.click, lambda b=btn: driver.execute_script("arguments[0].click();", b)):
+                    try:
+                        action()
+                        log(f"已点击下单按钮：{label}")
+                        return True
+                    except Exception:
+                        continue
+        time.sleep(0.2)
+    log("❌ 未能点击立即下单按钮。")
+    return False
+
 
 def confirm_if_needed(driver):
     """尝试点击确认/确定；若无弹窗则忽略"""
@@ -354,6 +698,7 @@ def booking_flow(driver, config: BookingConfig):
     for t in config.preferred_slots:
         for c in config.preferred_courts:
             ok = False
+            log(f"尝试预约组合：时间 {t}，第{c}块场地")
             for _ in range(config.click_retries):
                 if strict_select_slot(driver, t, c):
                     ok = True
@@ -362,11 +707,18 @@ def booking_flow(driver, config: BookingConfig):
             if not ok:
                 continue
 
-            # 可能弹出确认
+            if not click_selected_court_icon(driver, t, c):
+                log("⚠ 未能激活右侧的已选场地，尝试下一组合。")
+                continue
+
+            if not click_submit_order_button(driver):
+                log("⚠ 未能点击立即下单按钮，尝试下一组合。")
+                continue
+
+            time.sleep(0.2)
             confirm_if_needed(driver)
 
-            # 严格等待“明确成功提示/右侧状态变化”
-            if wait_success_toast(driver, timeout=4):
+            if wait_success_toast(driver, timeout=6):
                 log(f"✅ {c}号场地{t}时间预约成功")
                 return
             else:
@@ -377,7 +729,7 @@ def booking_flow(driver, config: BookingConfig):
 def parse_args(argv):
     default_config = BookingConfig().with_defaults()
     parser = argparse.ArgumentParser(
-        description="SJTU 体育馆羽毛球自动预约脚本（需手动登录后使用）"
+        description="SJTU 体育馆自动预约脚本（需手动登录后使用）"
     )
     parser.add_argument("--now", action="store_true", help="立即执行，不等待开放时间")
     parser.add_argument("--start-url", default=default_config.start_url, help="预约页面地址")
@@ -391,6 +743,16 @@ def parse_args(argv):
         "--open-time",
         default=default_config.open_time_str,
         help="每日开放时间，格式 HH:MM 或 HH:MM:SS (默认: %(default)s)",
+    )
+    parser.add_argument(
+        "--venue-name",
+        default=default_config.venue_name,
+        help="目标场馆名称 (默认: %(default)s)",
+    )
+    parser.add_argument(
+        "--activity-name",
+        default=default_config.activity_name,
+        help="目标活动/项目名称 (默认: %(default)s)",
     )
     parser.add_argument(
         "--slots",
@@ -427,6 +789,8 @@ def parse_args(argv):
         start_url=args.start_url,
         date_offset_days=args.date_offset,
         open_time_str=args.open_time,
+        venue_name=args.venue_name,
+        activity_name=args.activity_name,
         preferred_slots=_split_list(args.slots),
         preferred_courts=_split_list(args.courts, type_=int),
         click_retries=args.click_retries,
@@ -441,15 +805,35 @@ def main(argv=None):
     driver = build_driver(config)
     try:
         driver.get(config.start_url)
-        log("请手动登录并停留在羽毛球网格页面（能看到日期页签与时间行）。")
-        input("已到达页面后按 Enter 继续... ")
+        try:
+            log(f"初始页面 URL：{driver.current_url}")
+        except Exception:
+            pass
+        log("请手动登录体育场馆系统，完成后按 Enter 继续（脚本会在指定时间自动刷新并前往目标场馆/活动）。")
+        input("登录完成后按 Enter ... ")
 
         if args.now:
+            if not navigate_to_activity(driver, config, force_home=True):
+                log("❌ 无法自动跳转至目标场馆/活动，结束任务。")
+                return
             log("立即执行 (--now)")
             booking_flow(driver, config)
         else:
             target_dt = next_open_time(config.open_time_str)
             wait_until(target_dt)
+            log("⏰ 已到开放时间，刷新页面以获取最新数据。")
+            driver.refresh()
+            wait_document_ready(driver, timeout=12)
+            try:
+                log(f"刷新后当前 URL：{driver.current_url}")
+            except Exception:
+                pass
+            log("🔄 页面刷新完成，尝试自动跳转至目标场馆和活动。")
+            if not navigate_to_activity(driver, config, force_home=False):
+                log("ℹ️ 当前页面未能直接进入目标场馆，尝试重新打开主页面。")
+                if not navigate_to_activity(driver, config, force_home=True):
+                    log("❌ 刷新后自动导航失败，结束任务。")
+                    return
             booking_flow(driver, config)
 
         log("完成，8 秒后关闭浏览器。")
