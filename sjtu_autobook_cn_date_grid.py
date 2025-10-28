@@ -52,6 +52,7 @@ class BookingConfig:
     preferred_courts: List[int] = None
     click_retries: int = 3
     headless: bool = False
+    debug: bool = False
 
     def with_defaults(self) -> "BookingConfig":
         """填充可变默认值，避免在 dataclass 定义时共享列表。"""
@@ -423,9 +424,14 @@ function isEnabled(btn) {
 function getPanelState() {
   var selectedCount = 0, amount = 0.0, submitEnabled = false;
   try {
+    // 更精确地提取"选中的X"，避免误匹配年份
     var t = document.body.innerText || '';
-    var m1 = t.match(/选中的?\D*(\d+)/);
-    if (m1) selectedCount = parseInt(m1[1], 10) || 0;
+    var m1 = t.match(/选中的?[^\d]*?(\d+)(?:\s*个)?/);
+    if (m1) {
+      var num = parseInt(m1[1], 10);
+      // 过滤掉不合理的数字（如年份 2025）
+      if (num >= 0 && num < 100) selectedCount = num;
+    }
   } catch (err) {}
 
   try {
@@ -462,32 +468,128 @@ try {
     return;
   }
 
+  // 策略1: 查找 div.seat（实际的场地元素）
   var row = tnode;
-  var lastBtns = [];
+  var lastSeats = [];
+  var debugInfo = [];
+
+  // 先尝试查找 div.seat 元素
   for (var i = 0; i < 8; i += 1) {
     if (!row) break;
-    var btns = Array.from(row.querySelectorAll('button'));
-    var usable = btns.filter(function (b) { return isEnabled(b); });
-    if (usable.length > 0) {
-      lastBtns = usable;
+    var seats = Array.from(row.querySelectorAll('.seat'));
+    var usableSeats = seats.filter(function (s) {
+      // 排除已被购买的场地（bought-seat class）
+      var innerSeat = s.querySelector('.inner-seat');
+      if (innerSeat && /bought|disabled|unavailable|满/.test(innerSeat.className || '')) {
+        return false;
+      }
+      return isVisible(s);
+    });
+    debugInfo.push('level' + i + ':' + usableSeats.length + 'seats');
+    if (usableSeats.length > 0) {
+      lastSeats = usableSeats;
       break;
     }
     row = row.parentElement;
   }
-  if (lastBtns.length === 0) {
-    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: 'no clickable buttons in row' });
+
+  // 策略2: 如果没找到 seat，尝试查找 button（兼容其他页面结构）
+  if (lastSeats.length === 0) {
+    row = tnode;
+    for (var i = 0; i < 8; i += 1) {
+      if (!row) break;
+      var btns = Array.from(row.querySelectorAll('button'));
+      var usable = btns.filter(function (b) { return isEnabled(b); });
+      debugInfo.push('btn-level' + i + ':' + usable.length);
+      if (usable.length > 0) {
+        lastSeats = usable;
+        break;
+      }
+      row = row.parentElement;
+    }
+  }
+
+  // 策略3: 在时间节点的兄弟容器中查找
+  if (lastSeats.length === 0 && tnode.parentElement) {
+    var siblings = Array.from(tnode.parentElement.querySelectorAll('.seat, button'));
+    var usableSiblings = siblings.filter(function (el) {
+      if (el.classList.contains('seat')) {
+        var innerSeat = el.querySelector('.inner-seat');
+        return !innerSeat || !/bought|disabled/.test(innerSeat.className || '');
+      }
+      return isEnabled(el);
+    });
+    if (usableSiblings.length > 0) {
+      lastSeats = usableSiblings;
+      debugInfo.push('siblings:' + usableSiblings.length);
+    }
+  }
+
+  // 策略4: 查找时间节点之后的所有场地/按钮（直到下一个时间节点）
+  if (lastSeats.length === 0) {
+    var allElements = Array.from(document.querySelectorAll('body *'));
+    var tnodeIndex = -1;
+    var nextTimeNodeIndex = allElements.length;
+
+    for (var j = 0; j < allElements.length; j++) {
+      if (allElements[j] === tnode) {
+        tnodeIndex = j;
+        for (var k = j + 1; k < allElements.length; k++) {
+          if (/^\d{1,2}:\d{2}$/.test((allElements[k].textContent || '').trim())) {
+            nextTimeNodeIndex = k;
+            break;
+          }
+        }
+        break;
+      }
+    }
+
+    if (tnodeIndex >= 0) {
+      var betweenEls = [];
+      for (var m = tnodeIndex + 1; m < nextTimeNodeIndex && m < allElements.length; m++) {
+        var el = allElements[m];
+        var isClickable = false;
+        if (el.classList && el.classList.contains('seat')) {
+          var innerSeat = el.querySelector('.inner-seat');
+          isClickable = !innerSeat || !/bought|disabled/.test(innerSeat.className || '');
+        } else if (el.tagName === 'BUTTON') {
+          isClickable = isEnabled(el);
+        }
+        if (isClickable) {
+          betweenEls.push(el);
+        }
+      }
+      if (betweenEls.length > 0) {
+        lastSeats = betweenEls;
+        debugInfo.push('between:' + betweenEls.length);
+      }
+    }
+  }
+
+  if (lastSeats.length === 0) {
+    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: 'no clickable elements - ' + debugInfo.join(',') });
     return;
   }
 
-  var idx = Math.min(lastBtns.length, courtIndex) - 1;
-  var btn = lastBtns[idx];
-  if (!isEnabled(btn)) {
-    finish({ status: 'BUTTON_DISABLED', before: before, after: before, info: 'button disabled' });
+  var idx = Math.min(lastSeats.length, courtIndex) - 1;
+  var targetEl = lastSeats[idx];
+
+  // 检查元素是否可点击
+  var canClick = true;
+  if (targetEl.tagName === 'BUTTON') {
+    canClick = isEnabled(targetEl);
+  } else if (targetEl.classList && targetEl.classList.contains('seat')) {
+    var innerSeat = targetEl.querySelector('.inner-seat');
+    canClick = !innerSeat || !/bought|disabled/.test(innerSeat.className || '');
+  }
+
+  if (!canClick) {
+    finish({ status: 'BUTTON_DISABLED', before: before, after: before, info: 'element not clickable, idx=' + idx });
     return;
   }
 
-  btn.scrollIntoView({ block: 'center' });
-  btn.click();
+  targetEl.scrollIntoView({ block: 'center' });
+  targetEl.click();
 
   window.setTimeout(function () {
     var after = getPanelState();
@@ -498,7 +600,7 @@ try {
       status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT',
       before: before,
       after: after,
-      info: 'btnCount=' + lastBtns.length
+      info: 'count=' + lastSeats.length + ' clickedIdx=' + idx + ' debug=' + debugInfo.join(',')
     });
   }, 500);
 } catch (err) {
@@ -512,8 +614,8 @@ try {
 }
 """
 
-def strict_select_slot(driver, time_text, court_index):
-    """用 JS 执行严格选择；返回 True 表示“选择产生了实际效果”"""
+def strict_select_slot(driver, time_text, court_index, config=None):
+    """用 JS 执行严格选择；返回 True 表示"选择产生了实际效果""""
     try:
         raw = driver.execute_async_script(STRICT_CHECK_JS, time_text, court_index)
         if isinstance(raw, str):
@@ -521,11 +623,15 @@ def strict_select_slot(driver, time_text, court_index):
                 res = json.loads(raw)
             except Exception as exc:
                 log(f"JS 返回内容无法解析：{raw!r} ({exc})")
+                if config and config.debug:
+                    _save_debug_info(driver, f"parse_error_{time_text}_{court_index}")
                 return False
         elif isinstance(raw, dict):
             res = raw
         else:
             log(f"JS 返回异常：{raw!r}")
+            if config and config.debug:
+                _save_debug_info(driver, f"js_error_{time_text}_{court_index}")
             return False
         status = res.get("status")
         log(
@@ -538,10 +644,37 @@ def strict_select_slot(driver, time_text, court_index):
                 res.get("info"),
             )
         )
+
+        # 如果失败且启用了调试模式，保存调试信息
+        if status != "OK_SELECTED" and config and config.debug:
+            _save_debug_info(driver, f"{status}_{time_text}_{court_index}")
+
         return status == "OK_SELECTED"
     except Exception as e:
         log(f"JS 执行失败：{e}")
+        if config and config.debug:
+            _save_debug_info(driver, f"exception_{time_text}_{court_index}")
         return False
+
+
+def _save_debug_info(driver, suffix):
+    """保存页面截图和 HTML 用于调试"""
+    try:
+        timestamp = datetime.now(TZ).strftime("%Y%m%d_%H%M%S")
+        filename = f"debug_{timestamp}_{suffix}"
+
+        # 保存截图
+        screenshot_path = f"{filename}.png"
+        driver.save_screenshot(screenshot_path)
+        log(f"📸 已保存截图：{screenshot_path}")
+
+        # 保存页面 HTML
+        html_path = f"{filename}.html"
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        log(f"💾 已保存 HTML：{html_path}")
+    except Exception as e:
+        log(f"⚠ 保存调试信息失败：{e}")
 
 
 def click_selected_court_icon(driver, time_text: str, court_index: int, timeout: float = 2.5) -> bool:
@@ -700,7 +833,7 @@ def booking_flow(driver, config: BookingConfig):
             ok = False
             log(f"尝试预约组合：时间 {t}，第{c}块场地")
             for _ in range(config.click_retries):
-                if strict_select_slot(driver, t, c):
+                if strict_select_slot(driver, t, c, config):
                     ok = True
                     break
                 time.sleep(0.05)
@@ -783,6 +916,12 @@ def parse_args(argv):
         action="store_false",
         help="显示浏览器界面 (默认)",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=default_config.debug,
+        help="启用调试模式，失败时保存截图和 HTML",
+    )
 
     args = parser.parse_args(argv)
     config = BookingConfig(
@@ -795,6 +934,7 @@ def parse_args(argv):
         preferred_courts=_split_list(args.courts, type_=int),
         click_retries=args.click_retries,
         headless=args.headless,
+        debug=args.debug,
     ).with_defaults()
     return args, config
 
