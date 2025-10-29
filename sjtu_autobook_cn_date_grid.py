@@ -94,7 +94,7 @@ def log(m):
     print(f"[{datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}] {m}", flush=True)
 
 
-def wait_document_ready(driver, timeout=12):
+def wait_document_ready(driver, timeout=3):
     try:
         WebDriverWait(driver, timeout).until(
             lambda d: d.execute_script("return document.readyState") == "complete"
@@ -114,7 +114,7 @@ def is_on_grid_page(driver) -> bool:
     return any(k in body_text for k in keywords)
 
 
-def wait_for_grid_ready(driver, timeout=12):
+def wait_for_grid_ready(driver, timeout=3):
     keywords = ["选中的", "立即下单", "预约", "金额"]
     try:
         WebDriverWait(driver, timeout).until(
@@ -127,7 +127,7 @@ def wait_for_grid_ready(driver, timeout=12):
         return False
 
 
-def _click_element_by_text(driver, target_text: str, description: str, timeout=10):
+def _click_element_by_text(driver, target_text: str, description: str, timeout=3):
     if not target_text:
         return True
     log(f"查找{description}：{target_text}")
@@ -166,14 +166,14 @@ def _click_element_by_text(driver, target_text: str, description: str, timeout=1
                     except Exception:
                         continue
                 log(f"已点击{description}：{target_text}")
-                time.sleep(0.4)
+                time.sleep(0.05)
                 return True
-        time.sleep(0.3)
+        time.sleep(0.05)
     log(f"❌ 未能点击{description}：{target_text}")
     return False
 
 
-def _click_card_heading(driver, heading_text: str, description: str, timeout=10):
+def _click_card_heading(driver, heading_text: str, description: str, timeout=3):
     if not heading_text:
         return True
     try:
@@ -228,7 +228,7 @@ def _search_and_click_card(driver, keyword: str) -> bool:
         return True
     log(f"使用搜索定位场馆：{keyword}")
     try:
-        search_input = WebDriverWait(driver, 6).until(
+        search_input = WebDriverWait(driver, 2).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "input[placeholder*='场馆名称']"))
         )
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", search_input)
@@ -242,7 +242,7 @@ def _search_and_click_card(driver, keyword: str) -> bool:
         except Exception:
             search_btn = driver.find_element(By.CSS_SELECTOR, ".searchInput button")
         search_btn.click()
-        time.sleep(0.6)
+        time.sleep(0.2)
     except Exception as exc:
         log(f"❌ 搜索框操作失败：{exc}")
         return False
@@ -277,18 +277,18 @@ def navigate_to_activity(driver, config: BookingConfig, *, force_home=False) -> 
             or _search_and_click_card(driver, config.venue_name)
         ):
             return False
-        time.sleep(0.8)
+        time.sleep(0.1)
         if _switch_to_new_window(driver, handles_before):
-            wait_document_ready(driver, timeout=12)
+            wait_document_ready(driver, timeout=3)
         if config.activity_name and not _click_element_by_text(driver, config.activity_name, "活动"):
             return False
-        wait_for_grid_ready(driver, timeout=12)
+        wait_for_grid_ready(driver, timeout=3)
         return is_on_grid_page(driver)
 
     if force_home:
         log(f"打开预约主页面：{config.start_url}")
         driver.get(config.start_url)
-        wait_document_ready(driver, timeout=12)
+        wait_document_ready(driver, timeout=3)
         try:
             driver.switch_to.window(driver.window_handles[-1])
         except Exception:
@@ -300,7 +300,7 @@ def navigate_to_activity(driver, config: BookingConfig, *, force_home=False) -> 
 
     log("当前页面未找到目标场馆/活动，尝试返回主页面重新定位。")
     driver.get(config.start_url)
-    wait_document_ready(driver, timeout=12)
+    wait_document_ready(driver, timeout=3)
     try:
         driver.switch_to.window(driver.window_handles[-1])
     except Exception:
@@ -324,7 +324,7 @@ def build_driver(config: BookingConfig):
     opts.add_argument("--lang=zh-CN")
     svc = ChromeService(ChromeDriverManager().install())
     d = webdriver.Chrome(service=svc, options=opts)
-    d.implicitly_wait(2)
+    d.implicitly_wait(0.5)
     return d
 
 def wait_until(dt):
@@ -362,10 +362,10 @@ def click_date_tab(driver, target_date):
         target_date.strftime("%Y-%m-%d"),
     ]
     # 允许日期条需要横向滚动
-    for _ in range(8):
+    for _ in range(5):
         for txt in candidates:
             try:
-                el = WebDriverWait(driver, 0.9).until(
+                el = WebDriverWait(driver, 0.3).until(
                     EC.element_to_be_clickable((By.XPATH, f"//*[contains(normalize-space(text()), '{txt}')]"))
                 )
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
