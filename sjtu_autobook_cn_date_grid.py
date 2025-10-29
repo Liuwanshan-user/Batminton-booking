@@ -594,7 +594,7 @@ try {
     debugInfo.push('❌ 所有点击方法都失败');
   }
 
-  // 9. 等待更长时间让状态变化
+  // 9. 快速检测状态变化（优化速度）
   window.setTimeout(function () {
     var after = getPanelState();
     var changed = (after.selectedCount > before.selectedCount) ||
@@ -611,7 +611,7 @@ try {
       after: after,
       info: debugInfo.join(' | ')
     });
-  }, 800);
+  }, 250);
 } catch (err) {
   var info = '';
   try {
@@ -755,8 +755,8 @@ def click_selected_court_icon(driver, time_text: str, court_index: int, timeout:
     return False
 
 
-def click_submit_order_button(driver, timeout: float = 3.0) -> bool:
-    """点击“立即下单/提交订单”等按钮。"""
+def click_submit_order_button(driver, timeout: float = 2.0) -> bool:
+    """点击"立即下单/提交订单"等按钮。"""
     labels = ["立即下单", "提交订单", "立即预约", "确认预约", "立即支付"]
     end_time = time.time() + timeout
     while time.time() < end_time:
@@ -786,7 +786,7 @@ def click_submit_order_button(driver, timeout: float = 3.0) -> bool:
                         return True
                     except Exception:
                         continue
-        time.sleep(0.2)
+        time.sleep(0.05)
     log("❌ 未能点击立即下单按钮。")
     return False
 
@@ -794,7 +794,7 @@ def click_submit_order_button(driver, timeout: float = 3.0) -> bool:
 def confirm_if_needed(driver):
     """尝试点击确认/确定；若无弹窗则忽略"""
     try:
-        confirm = WebDriverWait(driver, 1.5).until(
+        confirm = WebDriverWait(driver, 0.5).until(
             EC.element_to_be_clickable((By.XPATH, "//button[contains(., '确认') or contains(., '确定')]"))
         )
         confirm.click()
@@ -811,7 +811,7 @@ def handle_booking_notice_dialog(driver, timeout=3):
             EC.presence_of_element_located((By.XPATH, "//div[@role='dialog']//span[contains(text(), '预订须知')]"))
         )
         log("✓ 检测到预订须知对话框")
-        time.sleep(0.3)
+        time.sleep(0.05)
 
         # 查找并勾选复选框
         checkbox_clicked = False
@@ -845,7 +845,7 @@ def handle_booking_notice_dialog(driver, timeout=3):
             except Exception:
                 log("⚠ 未能勾选复选框")
 
-        time.sleep(0.2)
+        time.sleep(0.05)
 
         # 点击"提交订单"按钮
         submit_button_clicked = False
@@ -874,7 +874,7 @@ def handle_booking_notice_dialog(driver, timeout=3):
         return False
 
 def wait_success_toast(driver, timeout=4):
-    """等待明确成功提示；若出现“已满/不可选/失败/库存不足”等提示，立即判定失败"""
+    """等待明确成功提示；若出现"已满/不可选/失败/库存不足"等提示，立即判定失败"""
     bad_words = ["已满", "不可选", "失败", "无可用", "库存不足", "预约次数已用尽", "超过限额"]
     good_words = ["成功", "已预约", "下单成功", "预约成功"]
     end = time.time() + timeout
@@ -890,7 +890,7 @@ def wait_success_toast(driver, timeout=4):
                 return True
         except Exception:
             pass
-        time.sleep(0.15)
+        time.sleep(0.08)
     # 超时：不算成功
     log("未检测到明确成功提示。最近页面文本片段：{}".format(last_text[:60].replace("\n"," ")))
     return False
@@ -921,20 +921,20 @@ def booking_flow(driver, config: BookingConfig):
 
             # 选中座位后直接下单，不需要点击右侧图标
             log(f"✅ 成功选中场地：{t} 第{c}块，准备下单")
-            time.sleep(0.3)  # 等待页面状态更新
+            time.sleep(0.1)  # 快速等待DOM更新
 
             if not click_submit_order_button(driver):
                 log("⚠ 未能点击立即下单按钮，尝试下一组合。")
                 continue
 
-            time.sleep(0.5)
+            time.sleep(0.15)
 
             # 处理预订须知对话框（勾选复选框并点击提交订单）
-            if not handle_booking_notice_dialog(driver):
+            if not handle_booking_notice_dialog(driver, timeout=2):
                 log("⚠ 未能处理预订须知对话框，尝试下一组合。")
                 continue
 
-            time.sleep(0.2)
+            time.sleep(0.1)
             confirm_if_needed(driver)
 
             if wait_success_toast(driver, timeout=6):
