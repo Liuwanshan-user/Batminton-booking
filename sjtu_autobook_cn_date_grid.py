@@ -803,6 +803,76 @@ def confirm_if_needed(driver):
     except Exception:
         return False
 
+def handle_booking_notice_dialog(driver, timeout=3):
+    """处理预订须知对话框：勾选复选框并点击提交订单"""
+    try:
+        # 等待对话框出现
+        dialog = WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.XPATH, "//div[@role='dialog']//span[contains(text(), '预订须知')]"))
+        )
+        log("✓ 检测到预订须知对话框")
+        time.sleep(0.3)
+
+        # 查找并勾选复选框
+        checkbox_clicked = False
+        try:
+            # 方法1: 直接点击 checkbox input
+            checkbox = driver.find_element(By.XPATH, "//label[@class='el-checkbox']//input[@type='checkbox']")
+            if not checkbox.is_selected():
+                checkbox.click()
+                log("✓ 已勾选预订须知复选框")
+                checkbox_clicked = True
+        except Exception:
+            pass
+
+        if not checkbox_clicked:
+            try:
+                # 方法2: 点击 label 元素
+                checkbox_label = driver.find_element(By.XPATH, "//label[@class='el-checkbox']")
+                checkbox_label.click()
+                log("✓ 已勾选预订须知复选框(label)")
+                checkbox_clicked = True
+            except Exception:
+                pass
+
+        if not checkbox_clicked:
+            try:
+                # 方法3: 点击包含文本的 label
+                checkbox_label = driver.find_element(By.XPATH, "//label[contains(., '本人已认真阅读')]")
+                checkbox_label.click()
+                log("✓ 已勾选预订须知复选框(text)")
+                checkbox_clicked = True
+            except Exception:
+                log("⚠ 未能勾选复选框")
+
+        time.sleep(0.2)
+
+        # 点击"提交订单"按钮
+        submit_button_clicked = False
+        try:
+            submit_btn = driver.find_element(By.XPATH, "//button[contains(., '提交订单')]")
+            submit_btn.click()
+            log("✓ 已点击提交订单按钮")
+            submit_button_clicked = True
+        except Exception:
+            try:
+                # 尝试用 JavaScript 点击
+                submit_btn = driver.find_element(By.XPATH, "//button[@class='el-button btnStyle el-button--primary']")
+                driver.execute_script("arguments[0].click();", submit_btn)
+                log("✓ 已点击提交订单按钮(JS)")
+                submit_button_clicked = True
+            except Exception:
+                log("❌ 未能点击提交订单按钮")
+
+        return checkbox_clicked and submit_button_clicked
+
+    except TimeoutException:
+        # 没有对话框，这是正常的
+        return True
+    except Exception as e:
+        log(f"⚠ 处理预订须知对话框时出错：{e}")
+        return False
+
 def wait_success_toast(driver, timeout=4):
     """等待明确成功提示；若出现“已满/不可选/失败/库存不足”等提示，立即判定失败"""
     bad_words = ["已满", "不可选", "失败", "无可用", "库存不足", "预约次数已用尽", "超过限额"]
@@ -855,6 +925,13 @@ def booking_flow(driver, config: BookingConfig):
 
             if not click_submit_order_button(driver):
                 log("⚠ 未能点击立即下单按钮，尝试下一组合。")
+                continue
+
+            time.sleep(0.5)
+
+            # 处理预订须知对话框（勾选复选框并点击提交订单）
+            if not handle_booking_notice_dialog(driver):
+                log("⚠ 未能处理预订须知对话框，尝试下一组合。")
                 continue
 
             time.sleep(0.2)
