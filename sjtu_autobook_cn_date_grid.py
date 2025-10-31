@@ -424,22 +424,36 @@ def click_date_tab(driver, target_date):
 QUICK_CHECK_AVAILABILITY_JS = r"""
 /*
   快速检查指定时间段的可用场地数量
-  返回: { timeFound: true/false, availableCount: number, totalSeats: number }
+  返回: {
+    timeFound: true/false,
+    availableCount: number,
+    totalSeats: number,
+    boughtCount: number,
+    debugInfo: string,
+    sampleClasses: array
+  }
 */
 var timeText = arguments[0];
+var debug = arguments[1] || false;
 var done = arguments[arguments.length - 1];
 
 function norm(s) { return String(s || '').trim().replace(/\s+/g, ''); }
 function isVisible(el) { return !!(el && el.offsetParent !== null); }
 
 try {
+  var debugInfo = [];
+  var sampleClasses = [];
+
   var leftUl = document.querySelector('ul.leftUl, ul.leftUl.fl');
   if (!leftUl) {
-    done({ timeFound: false, availableCount: 0, totalSeats: 0 });
+    debugInfo.push('❌ 未找到左侧时间列表(ul.leftUl)');
+    done({ timeFound: false, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
     return;
   }
 
   var timeItems = Array.from(leftUl.querySelectorAll('li'));
+  debugInfo.push('找到' + timeItems.length + '个时间项');
+
   var timeIndex = -1;
   for (var i = 0; i < timeItems.length; i++) {
     if (norm(timeItems[i].textContent) === norm(timeText)) {
@@ -449,43 +463,89 @@ try {
   }
 
   if (timeIndex === -1) {
-    done({ timeFound: false, availableCount: 0, totalSeats: 0 });
+    debugInfo.push('❌ 未找到时间"' + timeText + '"');
+    done({ timeFound: false, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
     return;
   }
 
+  debugInfo.push('✓ 找到时间索引:' + timeIndex);
+
   var tablesDiv = document.querySelector('div.tables, div.tables.fl');
   if (!tablesDiv) {
-    done({ timeFound: true, availableCount: 0, totalSeats: 0 });
+    debugInfo.push('❌ 未找到座位容器(div.tables)');
+    done({ timeFound: true, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
     return;
   }
 
   var seatRows = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
+  debugInfo.push('找到' + seatRows.length + '个座位行');
+
   if (timeIndex >= seatRows.length) {
-    done({ timeFound: true, availableCount: 0, totalSeats: 0 });
+    debugInfo.push('❌ 索引超出范围:' + timeIndex + '>=' + seatRows.length);
+    done({ timeFound: true, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
     return;
   }
 
   var targetRow = seatRows[timeIndex];
   var allSeats = Array.from(targetRow.querySelectorAll('div.seat'));
+  debugInfo.push('该行共' + allSeats.length + '个座位');
 
   var availableCount = 0;
+  var boughtCount = 0;
+  var unknownCount = 0;
+
   for (var j = 0; j < allSeats.length; j++) {
     var seat = allSeats[j];
     var innerSeat = seat.querySelector('.inner-seat');
-    if (!innerSeat) continue;
-
-    var innerClass = innerSeat.className || '';
-    if (/bought-seat|bought|已购|已订/.test(innerClass)) {
+    if (!innerSeat) {
+      unknownCount++;
       continue;
     }
-    if (/unselected-seat|available|可选|空闲/.test(innerClass) && isVisible(seat)) {
+
+    var innerClass = innerSeat.className || '';
+
+    // 收集前3个座位的class作为样本（用于调试）
+    if (sampleClasses.length < 3) {
+      sampleClasses.push(innerClass);
+    }
+
+    var isBought = /bought-seat|bought|已购|已订|disabled/.test(innerClass);
+    var isAvailable = /unselected-seat|unselected|available|可选|空闲/.test(innerClass);
+    var seatVisible = isVisible(seat);
+
+    if (isBought) {
+      boughtCount++;
+    } else if (isAvailable && seatVisible) {
       availableCount++;
+    } else {
+      // 如果既不是bought也不是available，可能是其他状态，保守起见算作可尝试
+      if (seatVisible) {
+        unknownCount++;
+        // 保守策略：未知状态的可见座位也计入可用
+        availableCount++;
+      }
     }
   }
 
-  done({ timeFound: true, availableCount: availableCount, totalSeats: allSeats.length });
+  debugInfo.push('统计: 可用=' + availableCount + ', 已订=' + boughtCount + ', 未知=' + unknownCount);
+
+  done({
+    timeFound: true,
+    availableCount: availableCount,
+    totalSeats: allSeats.length,
+    boughtCount: boughtCount,
+    debugInfo: debugInfo.join(' | '),
+    sampleClasses: sampleClasses
+  });
 } catch (err) {
-  done({ timeFound: false, availableCount: 0, totalSeats: 0 });
+  done({
+    timeFound: false,
+    availableCount: 0,
+    totalSeats: 0,
+    boughtCount: 0,
+    debugInfo: 'JS异常: ' + (err.message || String(err)),
+    sampleClasses: []
+  });
 }
 """
 
@@ -740,19 +800,29 @@ try {
 }
 """
 
-def quick_check_time_slot(driver, time_text):
-    """快速检查时间段的可用场地数量，返回 (timeFound, availableCount)"""
+def quick_check_time_slot(driver, time_text, debug=False):
+    """快速检查时间段的可用场地数量，返回 (timeFound, availableCount, totalSeats, debugInfo)"""
     try:
-        result = driver.execute_async_script(QUICK_CHECK_AVAILABILITY_JS, time_text)
+        result = driver.execute_async_script(QUICK_CHECK_AVAILABILITY_JS, time_text, debug)
         if isinstance(result, dict):
             time_found = result.get("timeFound", False)
             available_count = result.get("availableCount", 0)
             total_seats = result.get("totalSeats", 0)
-            return time_found, available_count, total_seats
-        return False, 0, 0
+            bought_count = result.get("boughtCount", 0)
+            debug_info = result.get("debugInfo", "")
+            sample_classes = result.get("sampleClasses", [])
+
+            # 输出详细调试信息
+            if debug or available_count == 0:
+                log(f"🔍 快速检查 {time_text}: {debug_info}")
+                if sample_classes:
+                    log(f"   样本class: {sample_classes[:3]}")
+
+            return time_found, available_count, total_seats, bought_count
+        return False, 0, 0, 0
     except Exception as e:
         log(f"⚠ 快速检查时间段失败：{e}")
-        return False, 0, 0
+        return False, 0, 0, 0
 
 
 def strict_select_slot(driver, time_text, court_index, config=None):
@@ -1048,18 +1118,26 @@ def booking_flow(driver, config: BookingConfig, start_time_index=0, start_court_
         if time_idx < start_time_index:
             continue
 
-        # 快速检查这个时间段是否有可用场地
-        time_found, available_count, total_seats = quick_check_time_slot(driver, t)
+        # 快速检查这个时间段是否有可用场地（启用调试模式）
+        time_found, available_count, total_seats, bought_count = quick_check_time_slot(
+            driver, t, debug=config.debug
+        )
 
         if not time_found:
             log(f"⏭️ 时间段 {t} 未找到，跳过")
             continue
 
+        # 改进策略：即使显示0个可用，也至少尝试第一个场地（防止误判）
         if available_count == 0:
-            log(f"⏭️ 时间段 {t} 无可用场地 (0/{total_seats})，直接跳过")
-            continue
-
-        log(f"✓ 时间段 {t} 发现 {available_count}/{total_seats} 个可用场地，开始抢订")
+            if bought_count == total_seats and total_seats > 0:
+                # 所有场地都已被订，确定跳过
+                log(f"⏭️ 时间段 {t} 全部已订 ({bought_count}/{total_seats})，跳过")
+                continue
+            else:
+                # 可能是检测误判，至少尝试第一个场地
+                log(f"⚠️ 时间段 {t} 快速检查显示无可用场地，但仍会尝试（可能误判）")
+        else:
+            log(f"✓ 时间段 {t} 发现 {available_count}/{total_seats} 个可用场地，开始抢订")
 
         # 确定从哪个场地开始
         start_court = start_court_index if time_idx == start_time_index else 0
