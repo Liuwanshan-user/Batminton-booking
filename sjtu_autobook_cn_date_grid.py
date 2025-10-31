@@ -498,21 +498,22 @@ try {
     return;
   }
 
-  // 步骤4: 获取所有 div.clearfix，然后过滤出座位行
-  // 关键：只保留直接包含 div.seat 子元素的 clearfix（排除容器 clearfix）
-  var allClearfix = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
-  debugInfo.push('clearfix总数:' + allClearfix.length);
+  // 步骤4: 使用正确的选择器获取座位行
+  // 关键：选择 div.inner-seat-wrapper.clearfix，然后获取其子元素中的 clearfix
+  var wrapper = document.querySelector('div.inner-seat-wrapper.clearfix');
+  if (!wrapper) {
+    debugInfo.push('❌ 未找到 div.inner-seat-wrapper.clearfix');
+    done({ timeFound: true, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
+    return;
+  }
 
+  // 获取 wrapper 的直接子元素中所有 clearfix（排除 ul 等其他子元素）
   var seatRows = [];
-  for (var i = 0; i < allClearfix.length; i++) {
-    // 使用 .children 获取直接子元素，然后过滤出 seat 类
-    var directSeats = Array.from(allClearfix[i].children).filter(function(child) {
-      return child.classList.contains('seat');
-    });
-
-    // 如果有直接 seat 子元素，说明这是座位行（不是容器）
-    if (directSeats.length > 0) {
-      seatRows.push(allClearfix[i]);
+  var wrapperChildren = Array.from(wrapper.children);
+  for (var i = 0; i < wrapperChildren.length; i++) {
+    var child = wrapperChildren[i];
+    if (child.classList.contains('clearfix')) {
+      seatRows.push(child);
     }
   }
 
@@ -612,14 +613,14 @@ try {
 # ---------- 关键：严格判断是否"真的选择成功/已下单成功" ----------
 STRICT_CHECK_JS = r"""
 /*
-  新的顺序扫描逻辑（不依赖索引映射）
+  基于HTML_STRUCTURE_FINAL.md的正确索引映射逻辑
 
   策略：
-  1. 点击左侧的时间li（触发右侧座位显示/更新）
-  2. 等待右侧座位加载（短暂延迟）
-  3. 扫描右侧所有可见的seat，按场地编号顺序
-  4. 找到第一个指定场地且状态为unselected-seat的，立即点击
-  5. 不再依赖左右索引对应关系
+  1. 在左侧 ul.leftUl 中找到时间索引
+  2. 在右侧 div.inner-seat-wrapper.clearfix 中获取座位行
+  3. 直接索引映射：li[N] → seatRows[N] → seats[M]
+  4. 检查状态并点击
+  5. 检测右侧面板状态变化
 
   返回：{
     status: "OK_SELECTED" | "TIME_NOT_FOUND" | "COURT_NOT_AVAILABLE" | "CLICK_NO_EFFECT" | "JS_EXCEPTION",
@@ -681,7 +682,7 @@ try {
   var debugInfo = [];
   debugInfo.push('🎯 目标:时间=' + timeText + ' 场地=' + courtIndex);
 
-  // ========== 步骤1: 找到并点击左侧时间li ==========
+  // ========== 步骤1: 在左侧时间列表中查找时间索引 ==========
   var leftUl = document.querySelector('ul.leftUl');
   if (!leftUl) {
     debugInfo.push('❌ 未找到ul.leftUl');
@@ -690,74 +691,69 @@ try {
   }
 
   var timeItems = Array.from(leftUl.querySelectorAll('li'));
-  var targetTimeLi = null;
+  var timeIndex = -1;
   for (var i = 0; i < timeItems.length; i++) {
     if (norm(timeItems[i].textContent) === norm(timeText)) {
-      targetTimeLi = timeItems[i];
+      timeIndex = i;
       break;
     }
   }
 
-  if (!targetTimeLi) {
+  if (timeIndex === -1) {
     debugInfo.push('❌ 未找到时间"' + timeText + '"');
     finish({ status: 'TIME_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
     return;
   }
 
-  debugInfo.push('✓ 找到时间li，准备点击');
+  debugInfo.push('✓ 时间"' + timeText + '"→索引' + timeIndex);
 
-  // 点击时间li（触发右侧座位显示/更新）
-  try {
-    targetTimeLi.scrollIntoView({ block: 'center' });
-    targetTimeLi.click();
-    debugInfo.push('✓ 已点击时间li');
-  } catch (err) {
-    debugInfo.push('⚠️ 点击时间li异常:' + err.message);
-  }
-
-  // ========== 步骤2: 等待右侧座位加载（同步等待200ms） ==========
-  // 注意：execute_async_script中不能用真正的sleep，但可以在后续轮询中等待
-  var waitStart = Date.now();
-  while (Date.now() - waitStart < 200) {
-    // 忙等待200ms
-  }
-  debugInfo.push('✓ 已等待200ms');
-
-  // ========== 步骤3: 查找右侧座位容器 ==========
-  var tablesDiv = document.querySelector('div.tables');
-  if (!tablesDiv) {
-    debugInfo.push('❌ 未找到div.tables');
+  // ========== 步骤2: 获取右侧座位行（使用正确的选择器） ==========
+  var wrapper = document.querySelector('div.inner-seat-wrapper.clearfix');
+  if (!wrapper) {
+    debugInfo.push('❌ 未找到div.inner-seat-wrapper.clearfix');
     finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
     return;
   }
 
-  // ========== 步骤4: 扫描所有可见的seat，按顺序查找指定场地 ==========
-  var allSeats = Array.from(tablesDiv.querySelectorAll('div.seat'));
-  debugInfo.push('扫描到' + allSeats.length + '个seat元素');
-
-  if (allSeats.length === 0) {
-    debugInfo.push('❌ 未找到任何seat元素');
-    finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
-    return;
-  }
-
-  // 按顺序查找第courtIndex个可见的seat
-  var visibleSeats = [];
-  for (var i = 0; i < allSeats.length; i++) {
-    if (isVisible(allSeats[i])) {
-      visibleSeats.push(allSeats[i]);
+  // 获取 wrapper 的直接子元素中所有 clearfix（这些就是座位行）
+  var seatRows = [];
+  var wrapperChildren = Array.from(wrapper.children);
+  for (var i = 0; i < wrapperChildren.length; i++) {
+    var child = wrapperChildren[i];
+    if (child.classList.contains('clearfix')) {
+      seatRows.push(child);
     }
   }
 
-  debugInfo.push('可见seat:' + visibleSeats.length + '个');
+  debugInfo.push('左侧时间:' + timeItems.length + ' 右侧座位行:' + seatRows.length);
 
-  if (courtIndex > visibleSeats.length) {
-    debugInfo.push('❌ 场地' + courtIndex + '超出范围(共' + visibleSeats.length + '个可见)');
+  // 检查数量匹配
+  if (timeItems.length !== seatRows.length) {
+    debugInfo.push('⚠️ 警告:左右数量不匹配！');
+  }
+
+  if (timeIndex >= seatRows.length) {
+    debugInfo.push('❌ 时间索引' + timeIndex + '超出范围(共' + seatRows.length + '行)');
     finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
     return;
   }
 
-  var targetSeat = visibleSeats[courtIndex - 1];
+  // ========== 步骤3: 获取对应时间行的所有座位 ==========
+  var targetRow = seatRows[timeIndex];
+  var allSeats = Array.from(targetRow.children).filter(function(child) {
+    return child.classList.contains('seat');
+  });
+
+  debugInfo.push('目标行座位数:' + allSeats.length);
+
+  if (courtIndex > allSeats.length) {
+    debugInfo.push('❌ 场地' + courtIndex + '超出范围(共' + allSeats.length + '个)');
+    finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
+    return;
+  }
+
+  // ========== 步骤4: 选择指定场地（场地编号从1开始，数组索引从0开始） ==========
+  var targetSeat = allSeats[courtIndex - 1];
   var innerSeat = targetSeat.querySelector('.inner-seat');
 
   if (!innerSeat) {
@@ -774,21 +770,25 @@ try {
   var hasUnselectedSeat = innerClass.indexOf('unselected-seat') !== -1;
 
   if (hasBoughtSeat) {
-    debugInfo.push('❌ 场地' + courtIndex + '已被预订');
+    debugInfo.push('❌ 场地' + courtIndex + '已被预订(bought-seat)');
     finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
     return;
   }
 
   if (!hasUnselectedSeat) {
-    debugInfo.push('❌ 场地' + courtIndex + '不可选');
+    debugInfo.push('❌ 场地' + courtIndex + '不可选(无unselected-seat)');
     finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
     return;
   }
 
-  debugInfo.push('✓ 场地' + courtIndex + '可用');
+  debugInfo.push('✓ 场地' + courtIndex + '可用(unselected-seat)');
 
   // ========== 步骤5: 点击场地 ==========
-  targetSeat.scrollIntoView({ block: 'center' });
+  try {
+    targetSeat.scrollIntoView({ block: 'center' });
+  } catch (err) {
+    debugInfo.push('⚠️ scrollIntoView失败');
+  }
 
   var clickSuccess = false;
   var clickMethods = [
@@ -812,7 +812,13 @@ try {
     }
   }
 
-  // ========== 步骤6: 检测状态变化 ==========
+  if (!clickSuccess) {
+    debugInfo.push('❌ 所有点击方法都失败');
+    finish({ status: 'CLICK_NO_EFFECT', before: before, after: before, info: debugInfo.join(' | ') });
+    return;
+  }
+
+  // ========== 步骤6: 检测右侧面板状态变化 ==========
   var checkCount = 0;
   var maxChecks = 10;
   var checkInterval = 50;
@@ -829,6 +835,7 @@ try {
 
       debugInfo.push('状态:选中' + before.selectedCount + '→' + after.selectedCount +
                      ' 金额￥' + before.amount + '→￥' + after.amount +
+                     ' 下单按钮:' + (before.submitEnabled ? '可用' : '不可用') + '→' + (after.submitEnabled ? '可用' : '不可用') +
                      ' (轮询' + checkCount + '次)');
 
       finish({

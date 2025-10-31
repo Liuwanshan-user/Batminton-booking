@@ -63,6 +63,100 @@ python sjtu_autobook_cn_date_grid.py --date-offset 7 --slots "18:00,19:00" --cou
 
 ## 修复记录
 
+### 2025-10-31 使用正确的DOM选择器，回归索引映射逻辑（第9版）
+
+**问题**：v8版本虽然改用顺序扫描，但用户反馈"越来越混乱了"
+
+**用户提供的完整HTML结构分析**（见HTML_STRUCTURE_FINAL.md）：
+```html
+<div class="tables fl">
+  <div>
+    <div class="clearfix">  ← 外层容器（不是座位行）
+      <div class="inner-seat-wrapper clearfix">  ← 🔑 关键包裹容器
+        <ul>场地1...场地16</ul>  ← 顶部标签
+        <div class="clearfix">  ← 第1行：07:00的16个场地
+        <div class="clearfix">  ← 第2行：08:00的16个场地
+        ...
+        <div class="clearfix">  ← 第16行：22:00的16个场地
+      </div>
+    </div>
+  </div>
+</div>
+```
+
+**根本原因**（终于发现！）：
+- ❌ **错误选择器**：`tablesDiv.querySelectorAll('div.clearfix')` 选中了**所有**clearfix
+  - 包括外层容器clearfix
+  - 包括inner-seat-wrapper本身
+  - 包括16个座位行
+  - **总共选中约18个元素，而不是16个座位行！**
+- ❌ **使用.children过滤**：虽然v5-v7尝试用`.children`过滤，但基础选择器就是错的
+- ❌ **v8的顺序扫描**：试图绕过索引映射问题，但没有解决根本原因
+
+**正确的选择器策略**（基于HTML_STRUCTURE_FINAL.md）：
+```javascript
+// ✅ 方法1：先选择wrapper，再获取其子元素
+var wrapper = document.querySelector('div.inner-seat-wrapper.clearfix');
+var wrapperChildren = Array.from(wrapper.children);
+var seatRows = [];
+for (var i = 0; i < wrapperChildren.length; i++) {
+  var child = wrapperChildren[i];
+  if (child.classList.contains('clearfix')) {
+    seatRows.push(child);
+  }
+}
+// 现在 seatRows.length = 16，完美匹配！
+
+// ✅ 方法2：使用CSS选择器（更简洁）
+var seatRows = Array.from(
+  document.querySelectorAll('div.inner-seat-wrapper.clearfix > div.clearfix')
+);
+```
+
+**索引对应关系**（现在是正确的）：
+```
+左侧时间列表          右侧座位行
+ul.leftUl > li     inner-seat-wrapper > div.clearfix
+
+li[0]  = 07:00  →  seatRows[0]  (16个seat)
+li[1]  = 08:00  →  seatRows[1]  (16个seat)
+li[2]  = 09:00  →  seatRows[2]  (16个seat)
+...
+li[11] = 18:00  →  seatRows[11] (16个seat)
+li[12] = 19:00  →  seatRows[12] (16个seat)
+...
+li[15] = 22:00  →  seatRows[15] (16个seat)
+```
+
+**关键改进**：
+1. ✅ **正确的容器选择**：选择`div.inner-seat-wrapper.clearfix`作为容器
+2. ✅ **精确的行选择**：只获取wrapper的直接子元素中的clearfix
+3. ✅ **回归简单逻辑**：不需要点击时间li，不需要扫描所有seat
+4. ✅ **直接索引映射**：`li[N]` → `seatRows[N]` → `seats[M]`
+5. ✅ **代码更清晰**：比v8的顺序扫描逻辑简单得多
+
+**修改的函数**：
+- `QUICK_CHECK_AVAILABILITY_JS`: 使用正确的wrapper选择器
+- `STRICT_CHECK_JS`: 完全重写，移除点击时间li的逻辑，使用正确的索引映射
+
+**v8与v9对比**：
+| 项目 | v8（顺序扫描） | v9（正确索引映射） |
+|------|----------------|-------------------|
+| 选择器 | ❌ 错误的`tablesDiv.querySelectorAll('div.clearfix')` | ✅ 正确的`wrapper.children` |
+| 点击时间li | ❌ 需要点击并等待200ms | ✅ 不需要点击 |
+| 扫描方式 | ❌ 扫描所有可见seat | ✅ 直接索引访问 |
+| 逻辑复杂度 | ⚠️ 较复杂 | ✅ 简单清晰 |
+| 执行速度 | ⚠️ 较慢（等待+扫描） | ✅ 快速（直接访问） |
+| 准确性 | ⚠️ 依赖可见性判断 | ✅ 精确匹配 |
+
+**预期效果**：
+- 左侧16个时间完全对应右侧16行座位
+- 18:00前面的场地能正确识别（不会再说"到11号才识别出来"）
+- 代码逻辑清晰，易于理解和维护
+- 执行速度更快（不需要点击和等待）
+
+---
+
 ### 2025-10-31 改用顺序扫描逻辑，不再依赖索引映射（第8版）
 
 **问题**：用户反馈"18:00前面场地有空余但还是说没有空余，到11号才识别出来"
