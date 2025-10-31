@@ -63,7 +63,62 @@ python sjtu_autobook_cn_date_grid.py --date-offset 7 --slots "18:00,19:00" --cou
 
 ## 修复记录
 
-### 2025-10-31 完全重写场地选择逻辑（第5版 - 最终版）
+### 2025-10-31 修复时间索引映射问题（第6版）
+
+**问题**：12:00能精准识别，但18:00和19:00明明有场地却显示没有场地
+
+**根本原因**：
+- 左侧时间列表包含所有时间（07:00-22:00，共16个li）
+- 右侧座位行只显示"可预约"的时间（比如当前时间15:00之后，只显示15:00-22:00，共8行）
+- 直接使用左侧时间列表的索引导致索引错位
+- **例如**：18:00在左侧是索引11，但在右侧应该是索引3（15:00=0, 16:00=1, 17:00=2, 18:00=3）
+
+**解决方案**：过滤左侧时间列表，只保留"可预约"的时间项（排除已过期/禁用的时间）
+
+```javascript
+// 过滤出可见且可用的时间项
+var allTimeItems = Array.from(leftUl.querySelectorAll('li'));
+var timeItems = [];
+for (var i = 0; i < allTimeItems.length; i++) {
+  var item = allTimeItems[i];
+  var isVisible = item.offsetParent !== null;
+  var classList = item.className || '';
+  var isDisabled = classList.indexOf('disabled') !== -1 ||
+                   classList.indexOf('passed') !== -1 ||
+                   classList.indexOf('unavailable') !== -1 ||
+                   item.style.display === 'none';
+
+  if (isVisible && !isDisabled) {
+    timeItems.push(item);  // 只保留可用时间
+  }
+}
+// 现在 timeItems.length 应该等于 seatRows.length
+```
+
+**关键改进**：
+1. ✅ **过滤已过期时间**：排除disabled/passed/unavailable/display:none的时间项
+2. ✅ **确保索引对应**：左侧可用时间数 = 右侧座位行数
+3. ✅ **添加详细调试**：输出时间总数、可用时间数、座位行数、可用时间列表
+4. ✅ **数量不匹配警告**：当左右数量不一致时输出明确警告
+
+**修改的函数**：
+- `QUICK_CHECK_AVAILABILITY_JS`: 添加时间项过滤逻辑和详细调试输出
+- `STRICT_CHECK_JS`: 添加时间项过滤逻辑和数量匹配检查
+
+**调试输出示例**：
+```
+左侧时间总数:16 | 可用时间数:8 | 座位行总数:8行
+可用时间列表=0:15:00,1:16:00,2:17:00,3:18:00,4:19:00,5:20:00,6:21:00,7:22:00
+✓ 时间"18:00"→可用时间索引3
+```
+
+**预期效果**：
+- 左侧可用时间数量 = 右侧座位行数量
+- 18:00/19:00等后续时间段能正确识别并预订
+
+---
+
+### 2025-10-31 完全重写场地选择逻辑（第5版）
 
 **问题**：经过多次修补，代码变得混乱，时间索引仍然不准确
 
