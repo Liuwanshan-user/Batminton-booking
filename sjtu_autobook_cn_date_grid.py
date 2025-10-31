@@ -668,48 +668,53 @@ try {
   var allSeats = Array.from(targetRow.querySelectorAll('div.seat'));
   debugInfo.push('✓ 该行座位总数:' + allSeats.length);
 
-  // 6. 过滤出可用座位（精确匹配 unselected-seat）
-  var availableSeats = [];
-  var boughtCount = 0;
-  var unselectedCount = 0;
+  // 6. 直接选择指定编号的场地（courtIndex就是场地编号）
+  // 用户配置：场地1, 2, 3... → 数组索引：0, 1, 2...
+  var targetSeatIndex = courtIndex - 1;
 
-  for (var j = 0; j < allSeats.length; j++) {
-    var seat = allSeats[j];
-    var innerSeat = seat.querySelector('.inner-seat');
-    if (!innerSeat) continue;
-
-    var innerClass = innerSeat.className || '';
-
-    // 精确匹配：使用 indexOf 而不是正则
-    var hasBoughtSeat = innerClass.indexOf('bought-seat') !== -1;
-    var hasUnselectedSeat = innerClass.indexOf('unselected-seat') !== -1;
-
-    if (hasBoughtSeat) {
-      boughtCount++;
-      continue;
-    }
-
-    if (hasUnselectedSeat && isVisible(seat)) {
-      availableSeats.push(seat);
-      unselectedCount++;
-    }
-  }
-
-  debugInfo.push('📊 座位统计: 总数=' + allSeats.length + ',已订=' + boughtCount + ',可选=' + unselectedCount);
-
-  if (availableSeats.length === 0) {
-    debugInfo.push('❌ 该时段无可用座位');
+  if (targetSeatIndex < 0 || targetSeatIndex >= allSeats.length) {
+    debugInfo.push('❌ 场地编号超出范围:' + courtIndex + ' (总共' + allSeats.length + '个场地)');
     finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
     return;
   }
 
-  // 7. 选择目标座位（courtIndex 从1开始）
-  var targetSeatIndex = Math.min(availableSeats.length, courtIndex) - 1;
-  var targetSeat = availableSeats[targetSeatIndex];
+  var targetSeat = allSeats[targetSeatIndex];
+  var innerSeat = targetSeat.querySelector('.inner-seat');
 
-  debugInfo.push('🎯 选择第' + courtIndex + '个可用座位(索引:' + targetSeatIndex + ')');
+  if (!innerSeat) {
+    debugInfo.push('❌ 场地' + courtIndex + '没有inner-seat元素');
+    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
+    return;
+  }
 
-  // 8. 尝试多种方式点击座位
+  var innerClass = innerSeat.className || '';
+  debugInfo.push('🎯 目标场地' + courtIndex + ' class: ' + innerClass);
+
+  // 7. 检查该场地是否可用
+  var hasBoughtSeat = innerClass.indexOf('bought-seat') !== -1;
+  var hasUnselectedSeat = innerClass.indexOf('unselected-seat') !== -1;
+
+  if (hasBoughtSeat) {
+    debugInfo.push('❌ 场地' + courtIndex + '已被预订');
+    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
+    return;
+  }
+
+  if (!hasUnselectedSeat) {
+    debugInfo.push('❌ 场地' + courtIndex + '不可选（状态未知）');
+    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
+    return;
+  }
+
+  if (!isVisible(targetSeat)) {
+    debugInfo.push('❌ 场地' + courtIndex + '不可见');
+    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
+    return;
+  }
+
+  debugInfo.push('✓ 场地' + courtIndex + '可用，准备点击');
+
+  // 8. 尝试多种方式点击该场地
   targetSeat.scrollIntoView({ block: 'center' });
 
   var clickSuccess = false;
@@ -1086,26 +1091,50 @@ def handle_booking_notice_dialog(driver, timeout=3):
         log(f"⚠ 处理预订须知对话框时出错：{e}")
         return False
 
-def wait_success_toast(driver, timeout=4):
-    """等待明确成功提示；若出现"已满/不可选/失败/库存不足"等提示，立即判定失败"""
+def wait_for_payment_page(driver, timeout=5):
+    """
+    等待跳转到支付页面（表示预订成功）
+    支付页面特征：URL变化、包含"支付"等关键字
+    """
     bad_words = ["已满", "不可选", "失败", "无可用", "库存不足", "预约次数已用尽", "超过限额"]
-    good_words = ["成功", "已预约", "下单成功", "预约成功"]
+    payment_keywords = ["支付", "payment", "pay", "订单详情", "待支付"]
+
+    initial_url = driver.current_url
     end = time.time() + timeout
-    last_text = ""
+
     while time.time() < end:
         try:
+            current_url = driver.current_url
             txt = driver.find_element(By.TAG_NAME, "body").text
-            last_text = txt
+
+            # 检查失败信息
             if any(w in txt for w in bad_words):
-                log("检测到站点返回失败信息：{}".format([w for w in bad_words if w in txt]))
+                log(f"检测到失败信息：{[w for w in bad_words if w in txt]}")
                 return False
-            if any(w in txt for w in good_words):
+
+            # 检查URL是否变化（跳转到其他页面）
+            if current_url != initial_url:
+                log(f"✓ 检测到页面跳转: {initial_url} → {current_url}")
+                # 检查是否包含支付相关关键字
+                if any(kw in txt for kw in payment_keywords):
+                    log(f"✓ 确认跳转到支付页面")
+                    return True
+                # 即使没有关键字，URL变化也可能表示成功
+                log(f"✓ URL已变化，可能已成功")
+                time.sleep(0.5)  # 再等0.5秒确认
                 return True
-        except Exception:
+
+            # 检查当前页面是否出现支付关键字
+            if any(kw in txt for kw in payment_keywords):
+                log(f"✓ 页面出现支付相关内容")
+                return True
+
+        except Exception as e:
+            log(f"⚠ 检测页面状态时出错: {e}")
             pass
-        time.sleep(0.08)
-    # 超时：不算成功
-    log("未检测到明确成功提示。最近页面文本片段：{}".format(last_text[:60].replace("\n"," ")))
+        time.sleep(0.1)
+
+    log("⏱ 超时：未检测到跳转到支付页面")
     return False
 
 def booking_flow(driver, config: BookingConfig, start_time_index=0, start_court_index=0):
@@ -1193,9 +1222,10 @@ def booking_flow(driver, config: BookingConfig, start_time_index=0, start_court_
 
             confirm_if_needed(driver)
 
-            # 快速检测成功提示
-            if wait_success_toast(driver, timeout=4):
+            # 检测是否跳转到支付页面（表示成功）
+            if wait_for_payment_page(driver, timeout=5):
                 log(f"🎉🎉🎉 预约成功！场地: {c}号，时间: {t} 🎉🎉🎉")
+                log(f"✓ 已跳转到支付页面，预订完成！")
                 return True, time_idx, court_idx
             else:
                 log(f"⚠ {c}号场地{t}时间提交失败，可能被其他人抢走了")
