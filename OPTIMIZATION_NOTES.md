@@ -63,6 +63,63 @@ python sjtu_autobook_cn_date_grid.py --date-offset 7 --slots "18:00,19:00" --cou
 
 ## 修复记录
 
+### 2025-10-31 完全重写场地选择逻辑（第5版 - 最终版）
+
+**问题**：经过多次修补，代码变得混乱，时间索引仍然不准确
+
+**根本原因**：
+- 多次叠加的修复导致代码逻辑不清晰
+- 没有严格遵循DOM_STRUCTURE_ANALYSIS.md中的推荐策略
+- 使用了不同的选择器方法（`:scope >` vs `.children`）导致不一致
+
+**解决方案**：基于DOM_STRUCTURE_ANALYSIS.md完全重写两个JavaScript函数
+
+**重写策略**（严格遵循DOM分析文档）：
+```javascript
+// 精确的DOM遍历步骤：
+// 1. 找到 div.tables
+var tablesDiv = document.querySelector('div.tables');
+
+// 2. 获取所有 div.clearfix
+var allClearfix = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
+
+// 3. 使用 .children 过滤：只保留直接包含 div.seat 子元素的 clearfix
+var seatRows = [];
+for (var i = 0; i < allClearfix.length; i++) {
+  var directSeats = Array.from(allClearfix[i].children).filter(function(child) {
+    return child.classList.contains('seat');
+  });
+  if (directSeats.length > 0) {
+    seatRows.push(allClearfix[i]);
+  }
+}
+
+// 4. seatRows[timeIndex] = 对应时间的座位行
+var targetRow = seatRows[timeIndex];
+
+// 5. allSeats[courtIndex-1] = 指定编号的场地
+var allSeats = Array.from(targetRow.children).filter(function(child) {
+  return child.classList.contains('seat');
+});
+var targetSeat = allSeats[courtIndex - 1];
+```
+
+**关键改进**：
+1. ✅ **统一选择器策略**：全部使用 `.children + filter()` 而不是 `:scope >`，更加可靠
+2. ✅ **清晰的步骤分隔**：每个步骤都有明确的注释（步骤1、步骤2...）
+3. ✅ **直接索引访问**：`allSeats[courtIndex-1]` 直接获取场地，不要先过滤
+4. ✅ **详细的调试信息**：每一步都输出清晰的调试日志
+5. ✅ **代码结构清晰**：从头到尾重写，没有历史包袱
+
+**修改的函数**：
+- `QUICK_CHECK_AVAILABILITY_JS`: 完全重写，使用 `.children` 过滤
+- `STRICT_CHECK_JS`: 完全重写，使用 `.children` 过滤
+
+**预期效果**：
+- 时间索引100%准确：li[11] (18:00) → seatRows[11]
+- 场地编号100%准确：场地3 → allSeats[2]
+- 代码清晰易维护，便于未来调试
+
 ### 2025-10-31 修复时间索引和优化跳过逻辑（第4版）
 
 **问题1 - 时间索引对不上**：
