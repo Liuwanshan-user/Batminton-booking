@@ -477,18 +477,47 @@ try {
     return;
   }
 
-  // 步骤4: 获取所有座位行
+  // 步骤4: 获取所有座位行（改进选择策略）
   var seatRows = [];
+
+  // 策略1: 获取wrapper的直接子元素中的clearfix div
   var wrapperChildren = Array.from(wrapper.children);
   for (var i = 0; i < wrapperChildren.length; i++) {
     var child = wrapperChildren[i];
-    if (child.classList.contains('clearfix')) {
+    // 跳过ul元素（场地名称）
+    if (child.tagName.toLowerCase() === 'ul') continue;
+    // 只选择div.clearfix
+    if (child.tagName.toLowerCase() === 'div' && child.classList.contains('clearfix')) {
       seatRows.push(child);
     }
   }
 
+  // 策略2: 如果策略1失败，尝试用querySelectorAll
+  if (seatRows.length === 0) {
+    debugInfo.push('策略1失败，尝试策略2');
+    var allClearfix = wrapper.querySelectorAll(':scope > div.clearfix');
+    seatRows = Array.from(allClearfix);
+  }
+
+  // 调试信息：输出wrapper的子元素类型
+  if (debug || seatRows.length === 0) {
+    var childTags = [];
+    for (var i = 0; i < Math.min(wrapperChildren.length, 10); i++) {
+      var c = wrapperChildren[i];
+      var tag = c.tagName.toLowerCase();
+      var cls = c.className || 'no-class';
+      childTags.push(tag + '.' + cls);
+    }
+    debugInfo.push('Wrapper子元素[前10个]:' + childTags.join(','));
+  }
+
+  if (seatRows.length === 0) {
+    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: debugInfo.join(' | ') + ' | ❌ 未找到任何座位行' });
+    return;
+  }
+
   if (timeIndex >= seatRows.length) {
-    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: '❌ 时间索引超出范围' });
+    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: debugInfo.join(' | ') + ' | ❌ 时间索引超出范围' });
     return;
   }
 
@@ -647,17 +676,41 @@ try {
     return;
   }
 
-  // 获取 wrapper 的直接子元素中所有 clearfix（排除 ul 等其他子元素）
+  // 获取所有座位行（改进选择策略）
   var seatRows = [];
   var wrapperChildren = Array.from(wrapper.children);
+
+  // 策略1: 获取wrapper的直接子元素中的clearfix div
   for (var i = 0; i < wrapperChildren.length; i++) {
     var child = wrapperChildren[i];
-    if (child.classList.contains('clearfix')) {
+    // 跳过ul元素（场地名称）
+    if (child.tagName.toLowerCase() === 'ul') continue;
+    // 只选择div.clearfix
+    if (child.tagName.toLowerCase() === 'div' && child.classList.contains('clearfix')) {
       seatRows.push(child);
     }
   }
 
+  // 策略2: 如果策略1失败，尝试用querySelectorAll
+  if (seatRows.length === 0) {
+    debugInfo.push('策略1失败→策略2');
+    var allClearfix = wrapper.querySelectorAll(':scope > div.clearfix');
+    seatRows = Array.from(allClearfix);
+  }
+
   debugInfo.push('座位行数:' + seatRows.length + '行');
+
+  // 调试：输出wrapper的子元素类型
+  if (debug && seatRows.length === 0) {
+    var childTags = [];
+    for (var i = 0; i < Math.min(wrapperChildren.length, 5); i++) {
+      var c = wrapperChildren[i];
+      var tag = c.tagName.toLowerCase();
+      var cls = c.className || 'no-class';
+      childTags.push(tag + '.' + cls);
+    }
+    debugInfo.push('Wrapper子元素:' + childTags.join(','));
+  }
 
   // 检查数量匹配
   if (timeItems.length !== seatRows.length) {
@@ -855,14 +908,26 @@ try {
     return;
   }
 
-  // 获取 wrapper 的直接子元素中所有 clearfix（这些就是座位行）
+  // 获取所有座位行（改进选择策略）
   var seatRows = [];
   var wrapperChildren = Array.from(wrapper.children);
+
+  // 策略1: 获取wrapper的直接子元素中的clearfix div
   for (var i = 0; i < wrapperChildren.length; i++) {
     var child = wrapperChildren[i];
-    if (child.classList.contains('clearfix')) {
+    // 跳过ul元素（场地名称）
+    if (child.tagName.toLowerCase() === 'ul') continue;
+    // 只选择div.clearfix
+    if (child.tagName.toLowerCase() === 'div' && child.classList.contains('clearfix')) {
       seatRows.push(child);
     }
+  }
+
+  // 策略2: 如果策略1失败，尝试用querySelectorAll
+  if (seatRows.length === 0) {
+    debugInfo.push('策略1失败→策略2');
+    var allClearfix = wrapper.querySelectorAll(':scope > div.clearfix');
+    seatRows = Array.from(allClearfix);
   }
 
   debugInfo.push('左侧时间:' + timeItems.length + ' 右侧座位行:' + seatRows.length);
@@ -1377,9 +1442,9 @@ def booking_flow(driver, config: BookingConfig, start_time_index=0):
         if available_count == 0:
             log(f"⚠️ 时间段 {t} 检测显示0个可用，尝试智能查找")
 
-        # 使用智能查找获取第一个可用场地
+        # 使用智能查找获取第一个可用场地（总是启用debug以便排查问题）
         found, court_index, court_name, total_seats, debug_info = find_first_available_court(
-            driver, t, debug=config.debug
+            driver, t, debug=True
         )
 
         if not found:
