@@ -424,6 +424,7 @@ def click_date_tab(driver, target_date):
 QUICK_CHECK_AVAILABILITY_JS = r"""
 /*
   快速检查指定时间段的可用场地数量
+  基于实际DOM结构优化
   返回: {
     timeFound: true/false,
     availableCount: number,
@@ -444,13 +445,15 @@ try {
   var debugInfo = [];
   var sampleClasses = [];
 
-  var leftUl = document.querySelector('ul.leftUl, ul.leftUl.fl');
+  // 1. 查找左侧时间列表
+  var leftUl = document.querySelector('ul.leftUl');
   if (!leftUl) {
-    debugInfo.push('❌ 未找到左侧时间列表(ul.leftUl)');
+    debugInfo.push('❌ 未找到左侧时间列表 ul.leftUl');
     done({ timeFound: false, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
     return;
   }
 
+  // 2. 查找时间索引
   var timeItems = Array.from(leftUl.querySelectorAll('li'));
   debugInfo.push('找到' + timeItems.length + '个时间项');
 
@@ -470,14 +473,22 @@ try {
 
   debugInfo.push('✓ 找到时间索引:' + timeIndex);
 
-  var tablesDiv = document.querySelector('div.tables, div.tables.fl');
+  // 3. 查找右侧座位容器
+  var tablesDiv = document.querySelector('div.tables');
   if (!tablesDiv) {
-    debugInfo.push('❌ 未找到座位容器(div.tables)');
+    debugInfo.push('❌ 未找到座位容器 div.tables');
     done({ timeFound: true, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
     return;
   }
 
-  var seatRows = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
+  // 4. 获取所有座位行（每个 div.clearfix 是一行）
+  // 跳过第一个clearfix（那是场地标题行）
+  var allRows = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
+  var seatRows = allRows.filter(function(row) {
+    // 座位行应该包含 div.seat 元素
+    return row.querySelector('div.seat') !== null;
+  });
+
   debugInfo.push('找到' + seatRows.length + '个座位行');
 
   if (timeIndex >= seatRows.length) {
@@ -486,21 +497,18 @@ try {
     return;
   }
 
+  // 5. 获取对应时间行的所有座位
   var targetRow = seatRows[timeIndex];
   var allSeats = Array.from(targetRow.querySelectorAll('div.seat'));
   debugInfo.push('该行共' + allSeats.length + '个座位');
 
   var availableCount = 0;
   var boughtCount = 0;
-  var unknownCount = 0;
 
   for (var j = 0; j < allSeats.length; j++) {
     var seat = allSeats[j];
     var innerSeat = seat.querySelector('.inner-seat');
-    if (!innerSeat) {
-      unknownCount++;
-      continue;
-    }
+    if (!innerSeat) continue;
 
     var innerClass = innerSeat.className || '';
 
@@ -509,25 +517,21 @@ try {
       sampleClasses.push(innerClass);
     }
 
-    var isBought = /bought-seat|bought|已购|已订|disabled/.test(innerClass);
-    var isAvailable = /unselected-seat|unselected|available|可选|空闲/.test(innerClass);
-    var seatVisible = isVisible(seat);
+    // 严格匹配：只识别 bought-seat 和 unselected-seat
+    var hasBoughtSeat = innerClass.indexOf('bought-seat') !== -1;
+    var hasUnselectedSeat = innerClass.indexOf('unselected-seat') !== -1;
 
-    if (isBought) {
+    if (hasBoughtSeat) {
+      // 已预约
       boughtCount++;
-    } else if (isAvailable && seatVisible) {
+    } else if (hasUnselectedSeat && isVisible(seat)) {
+      // 未预约且可见
       availableCount++;
-    } else {
-      // 如果既不是bought也不是available，可能是其他状态，保守起见算作可尝试
-      if (seatVisible) {
-        unknownCount++;
-        // 保守策略：未知状态的可见座位也计入可用
-        availableCount++;
-      }
     }
+    // 其他情况不计数（既不是已订也不是可选）
   }
 
-  debugInfo.push('统计: 可用=' + availableCount + ', 已订=' + boughtCount + ', 未知=' + unknownCount);
+  debugInfo.push('统计: 可用=' + availableCount + ', 已订=' + boughtCount + ', 总计=' + allSeats.length);
 
   done({
     timeFound: true,
@@ -612,9 +616,9 @@ try {
   var before = getPanelState();
   var debugInfo = ['🔍 开始查找时间:' + timeText + ',场地:' + courtIndex];
 
-  // 新策略：处理左右分离的布局
+  // 基于实际DOM结构优化
   // 1. 找到左侧时间列表 ul.leftUl
-  var leftUl = document.querySelector('ul.leftUl, ul.leftUl.fl');
+  var leftUl = document.querySelector('ul.leftUl');
   if (!leftUl) {
     finish({ status: 'TIME_NOT_FOUND', before: before, after: before, info: 'leftUl not found' });
     return;
@@ -639,15 +643,18 @@ try {
   debugInfo.push('✓ 找到时间索引:' + timeIndex + '/' + timeItems.length);
 
   // 3. 找到右侧座位容器
-  var tablesDiv = document.querySelector('div.tables, div.tables.fl');
+  var tablesDiv = document.querySelector('div.tables');
   if (!tablesDiv) {
     debugInfo.push('❌ 未找到座位容器 div.tables');
     finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
     return;
   }
 
-  // 4. 获取所有座位行（每个 div.clearfix 是一行）
-  var seatRows = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
+  // 4. 获取所有座位行（过滤出包含 div.seat 的行）
+  var allRows = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
+  var seatRows = allRows.filter(function(row) {
+    return row.querySelector('div.seat') !== null;
+  });
   debugInfo.push('✓ 找到座位行数:' + seatRows.length);
 
   if (timeIndex >= seatRows.length) {
@@ -661,7 +668,7 @@ try {
   var allSeats = Array.from(targetRow.querySelectorAll('div.seat'));
   debugInfo.push('✓ 该行座位总数:' + allSeats.length);
 
-  // 6. 过滤出可用座位（排除 bought-seat）
+  // 6. 过滤出可用座位（精确匹配 unselected-seat）
   var availableSeats = [];
   var boughtCount = 0;
   var unselectedCount = 0;
@@ -673,12 +680,16 @@ try {
 
     var innerClass = innerSeat.className || '';
 
-    if (/bought-seat|bought|已购|已订/.test(innerClass)) {
+    // 精确匹配：使用 indexOf 而不是正则
+    var hasBoughtSeat = innerClass.indexOf('bought-seat') !== -1;
+    var hasUnselectedSeat = innerClass.indexOf('unselected-seat') !== -1;
+
+    if (hasBoughtSeat) {
       boughtCount++;
       continue;
     }
 
-    if (/unselected-seat|available|可选|空闲/.test(innerClass) && isVisible(seat)) {
+    if (hasUnselectedSeat && isVisible(seat)) {
       availableSeats.push(seat);
       unselectedCount++;
     }
