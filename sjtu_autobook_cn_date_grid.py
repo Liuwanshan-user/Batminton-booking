@@ -457,37 +457,21 @@ try {
   }
 
   // 步骤2: 在左侧列表中查找时间索引
-  // 关键：只保留"可预约"的时间项（排除已过期/禁用的时间）
-  var allTimeItems = Array.from(leftUl.querySelectorAll('li'));
-  debugInfo.push('左侧时间总数:' + allTimeItems.length);
+  // 所有时间都会显示，不需要过滤
+  var timeItems = Array.from(leftUl.querySelectorAll('li'));
+  debugInfo.push('左侧时间项数:' + timeItems.length);
 
-  // 过滤出可见且可用的时间项
-  var timeItems = [];
-  for (var i = 0; i < allTimeItems.length; i++) {
-    var item = allTimeItems[i];
-    // 检查是否可见且不是禁用状态
-    // 已过期的时间通常会有特殊的class或style
-    var isVisible = item.offsetParent !== null;
-    var classList = item.className || '';
-    var isDisabled = classList.indexOf('disabled') !== -1 ||
-                     classList.indexOf('passed') !== -1 ||
-                     classList.indexOf('unavailable') !== -1 ||
-                     item.style.display === 'none';
-
-    if (isVisible && !isDisabled) {
-      timeItems.push(item);
-    }
-  }
-
-  debugInfo.push('可用时间数:' + timeItems.length);
-
-  // 输出所有可用时间项用于调试
-  var timeList = [];
-  for (var i = 0; i < timeItems.length; i++) {
-    timeList.push(i + ':' + norm(timeItems[i].textContent));
-  }
+  // 输出所有时间项的详细信息用于调试
   if (debug) {
-    debugInfo.push('可用时间列表=' + timeList.join(','));
+    var timeListDebug = [];
+    for (var i = 0; i < Math.min(timeItems.length, 20); i++) {
+      var item = timeItems[i];
+      var text = norm(item.textContent);
+      var classes = item.className || '';
+      var visible = item.offsetParent !== null ? 'v' : 'h';
+      timeListDebug.push(i + ':' + text + '(' + visible + ')');
+    }
+    debugInfo.push('时间列表=' + timeListDebug.join(','));
   }
 
   var timeIndex = -1;
@@ -504,7 +488,7 @@ try {
     return;
   }
 
-  debugInfo.push('✓ 时间"' + timeText + '"→可用时间索引' + timeIndex);
+  debugInfo.push('✓ 时间"' + timeText + '"→索引' + timeIndex);
 
   // 步骤3: 查找右侧座位容器 div.tables
   var tablesDiv = document.querySelector('div.tables');
@@ -517,8 +501,9 @@ try {
   // 步骤4: 获取所有 div.clearfix，然后过滤出座位行
   // 关键：只保留直接包含 div.seat 子元素的 clearfix（排除容器 clearfix）
   var allClearfix = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
-  var seatRows = [];
+  debugInfo.push('clearfix总数:' + allClearfix.length);
 
+  var seatRows = [];
   for (var i = 0; i < allClearfix.length; i++) {
     // 使用 .children 获取直接子元素，然后过滤出 seat 类
     var directSeats = Array.from(allClearfix[i].children).filter(function(child) {
@@ -531,21 +516,31 @@ try {
     }
   }
 
-  debugInfo.push('座位行总数:' + seatRows.length + '行');
+  debugInfo.push('座位行数:' + seatRows.length + '行');
 
   // 检查数量匹配
   if (timeItems.length !== seatRows.length) {
-    debugInfo.push('⚠️ 警告:左侧可用时间(' + timeItems.length + ')≠右侧座位行(' + seatRows.length + ')');
+    debugInfo.push('⚠️ 警告:左侧时间(' + timeItems.length + ')≠右侧座位行(' + seatRows.length + ') 索引会错位！');
   }
 
   // 输出每行的座位数量用于调试
   if (debug) {
     var rowInfo = [];
-    for (var i = 0; i < seatRows.length; i++) {
+    for (var i = 0; i < Math.min(seatRows.length, 20); i++) {
       var rowSeats = Array.from(seatRows[i].children).filter(function(child) {
         return child.classList.contains('seat');
       });
-      rowInfo.push(i + ':' + rowSeats.length + '座位');
+      // 统计该行的状态
+      var boughtCount = 0, unselectedCount = 0;
+      for (var j = 0; j < rowSeats.length; j++) {
+        var innerSeat = rowSeats[j].querySelector('.inner-seat');
+        if (innerSeat) {
+          var cls = innerSeat.className || '';
+          if (cls.indexOf('bought-seat') !== -1) boughtCount++;
+          else if (cls.indexOf('unselected-seat') !== -1) unselectedCount++;
+        }
+      }
+      rowInfo.push(i + ':' + rowSeats.length + '座(' + unselectedCount + '可用,' + boughtCount + '已订)');
     }
     debugInfo.push('座位行明细=' + rowInfo.join(','));
   }
@@ -699,28 +694,9 @@ try {
   }
 
   // ========== 步骤2: 在左侧列表中查找时间索引 ==========
-  // 关键：只保留"可预约"的时间项（排除已过期/禁用的时间）
-  var allTimeItems = Array.from(leftUl.querySelectorAll('li'));
-  debugInfo.push('左侧时间总数:' + allTimeItems.length);
-
-  // 过滤出可见且可用的时间项
-  var timeItems = [];
-  for (var i = 0; i < allTimeItems.length; i++) {
-    var item = allTimeItems[i];
-    // 检查是否可见且不是禁用状态
-    var isVisible = item.offsetParent !== null;
-    var classList = item.className || '';
-    var isDisabled = classList.indexOf('disabled') !== -1 ||
-                     classList.indexOf('passed') !== -1 ||
-                     classList.indexOf('unavailable') !== -1 ||
-                     item.style.display === 'none';
-
-    if (isVisible && !isDisabled) {
-      timeItems.push(item);
-    }
-  }
-
-  debugInfo.push('可用时间数:' + timeItems.length);
+  // 所有时间都会显示，不需要过滤
+  var timeItems = Array.from(leftUl.querySelectorAll('li'));
+  debugInfo.push('左侧时间项数:' + timeItems.length);
 
   var timeIndex = -1;
   for (var i = 0; i < timeItems.length; i++) {
@@ -736,7 +712,7 @@ try {
     return;
   }
 
-  debugInfo.push('✓ 时间"' + timeText + '"→可用时间索引' + timeIndex);
+  debugInfo.push('✓ 时间"' + timeText + '"→索引' + timeIndex);
 
   // ========== 步骤3: 查找右侧座位容器 div.tables ==========
   var tablesDiv = document.querySelector('div.tables');
@@ -749,8 +725,9 @@ try {
   // ========== 步骤4: 获取所有 div.clearfix，然后过滤出座位行 ==========
   // 关键：只保留直接包含 div.seat 子元素的 clearfix（排除容器 clearfix）
   var allClearfix = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
-  var seatRows = [];
+  debugInfo.push('clearfix总数:' + allClearfix.length);
 
+  var seatRows = [];
   for (var i = 0; i < allClearfix.length; i++) {
     // 使用 .children 获取直接子元素，然后过滤出 seat 类
     var directSeats = Array.from(allClearfix[i].children).filter(function(child) {
@@ -763,11 +740,11 @@ try {
     }
   }
 
-  debugInfo.push('座位行总数:' + seatRows.length + '行');
+  debugInfo.push('座位行数:' + seatRows.length + '行');
 
   // 检查数量匹配
   if (timeItems.length !== seatRows.length) {
-    debugInfo.push('⚠️ 警告:左侧可用时间(' + timeItems.length + ')≠右侧座位行(' + seatRows.length + ')');
+    debugInfo.push('⚠️ 警告:左侧时间(' + timeItems.length + ')≠右侧座位行(' + seatRows.length + ') 索引会错位！');
   }
 
   if (seatRows.length === 0) {
