@@ -108,6 +108,41 @@ def wait_document_ready(driver, timeout=3):
         return False
 
 
+def smart_wait_for_element(driver, by, value, timeout=2, condition="clickable"):
+    """智能等待元素出现，支持多种条件"""
+    try:
+        if condition == "clickable":
+            element = WebDriverWait(driver, timeout).until(
+                EC.element_to_be_clickable((by, value))
+            )
+        elif condition == "visible":
+            element = WebDriverWait(driver, timeout).until(
+                EC.visibility_of_element_located((by, value))
+            )
+        elif condition == "present":
+            element = WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((by, value))
+            )
+        return element
+    except TimeoutException:
+        return None
+
+
+def smart_wait_for_any_condition(driver, conditions, timeout=2):
+    """等待多个条件中的任意一个满足"""
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        for condition_func in conditions:
+            try:
+                result = condition_func()
+                if result:
+                    return result
+            except Exception:
+                pass
+        time.sleep(0.05)
+    return None
+
+
 def is_on_grid_page(driver) -> bool:
     try:
         body_text = driver.find_element(By.TAG_NAME, "body").text
@@ -169,9 +204,9 @@ def _click_element_by_text(driver, target_text: str, description: str, timeout=3
                     except Exception:
                         continue
                 log(f"已点击{description}：{target_text}")
-                time.sleep(0.05)
+                time.sleep(0.03)  # 优化：减少延迟
                 return True
-        time.sleep(0.05)
+        time.sleep(0.03)  # 优化：减少延迟
     log(f"❌ 未能点击{description}：{target_text}")
     return False
 
@@ -245,7 +280,7 @@ def _search_and_click_card(driver, keyword: str) -> bool:
         except Exception:
             search_btn = driver.find_element(By.CSS_SELECTOR, ".searchInput button")
         search_btn.click()
-        time.sleep(0.2)
+        time.sleep(0.1)  # 优化：减少延迟
     except Exception as exc:
         log(f"❌ 搜索框操作失败：{exc}")
         return False
@@ -280,9 +315,9 @@ def navigate_to_activity(driver, config: BookingConfig, *, force_home=False) -> 
             or _search_and_click_card(driver, config.venue_name)
         ):
             return False
-        time.sleep(0.1)
+        time.sleep(0.05)  # 优化：减少延迟
         if _switch_to_new_window(driver, handles_before):
-            wait_document_ready(driver, timeout=3)
+            wait_document_ready(driver, timeout=2)  # 优化：减少超时时间
         if config.activity_name and not _click_element_by_text(driver, config.activity_name, "活动"):
             return False
         wait_for_grid_ready(driver, timeout=3)
@@ -384,6 +419,75 @@ def click_date_tab(driver, target_date):
             pass
     log("未找到目标日期页签。")
     return False
+
+# ---------- 快速检查时间段可用场地数量 ----------
+QUICK_CHECK_AVAILABILITY_JS = r"""
+/*
+  快速检查指定时间段的可用场地数量
+  返回: { timeFound: true/false, availableCount: number, totalSeats: number }
+*/
+var timeText = arguments[0];
+var done = arguments[arguments.length - 1];
+
+function norm(s) { return String(s || '').trim().replace(/\s+/g, ''); }
+function isVisible(el) { return !!(el && el.offsetParent !== null); }
+
+try {
+  var leftUl = document.querySelector('ul.leftUl, ul.leftUl.fl');
+  if (!leftUl) {
+    done({ timeFound: false, availableCount: 0, totalSeats: 0 });
+    return;
+  }
+
+  var timeItems = Array.from(leftUl.querySelectorAll('li'));
+  var timeIndex = -1;
+  for (var i = 0; i < timeItems.length; i++) {
+    if (norm(timeItems[i].textContent) === norm(timeText)) {
+      timeIndex = i;
+      break;
+    }
+  }
+
+  if (timeIndex === -1) {
+    done({ timeFound: false, availableCount: 0, totalSeats: 0 });
+    return;
+  }
+
+  var tablesDiv = document.querySelector('div.tables, div.tables.fl');
+  if (!tablesDiv) {
+    done({ timeFound: true, availableCount: 0, totalSeats: 0 });
+    return;
+  }
+
+  var seatRows = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
+  if (timeIndex >= seatRows.length) {
+    done({ timeFound: true, availableCount: 0, totalSeats: 0 });
+    return;
+  }
+
+  var targetRow = seatRows[timeIndex];
+  var allSeats = Array.from(targetRow.querySelectorAll('div.seat'));
+
+  var availableCount = 0;
+  for (var j = 0; j < allSeats.length; j++) {
+    var seat = allSeats[j];
+    var innerSeat = seat.querySelector('.inner-seat');
+    if (!innerSeat) continue;
+
+    var innerClass = innerSeat.className || '';
+    if (/bought-seat|bought|已购|已订/.test(innerClass)) {
+      continue;
+    }
+    if (/unselected-seat|available|可选|空闲/.test(innerClass) && isVisible(seat)) {
+      availableCount++;
+    }
+  }
+
+  done({ timeFound: true, availableCount: availableCount, totalSeats: allSeats.length });
+} catch (err) {
+  done({ timeFound: false, availableCount: 0, totalSeats: 0 });
+}
+"""
 
 # ---------- 关键：严格判断是否"真的选择成功/已下单成功" ----------
 STRICT_CHECK_JS = r"""
@@ -597,24 +701,34 @@ try {
     debugInfo.push('❌ 所有点击方法都失败');
   }
 
-  // 9. 快速检测状态变化（优化速度）
-  window.setTimeout(function () {
+  // 9. 智能检测状态变化（多次检测，快速响应）
+  var checkCount = 0;
+  var maxChecks = 10; // 最多检测10次，每次50ms，总计500ms
+  var checkInterval = 50;
+
+  var intervalId = window.setInterval(function () {
+    checkCount++;
     var after = getPanelState();
     var changed = (after.selectedCount > before.selectedCount) ||
       (after.amount > before.amount) ||
       (!before.submitEnabled && after.submitEnabled);
 
-    debugInfo.push('📈 状态变化: 选中' + before.selectedCount + '->' + after.selectedCount +
-                   ', 金额￥' + before.amount + '->￥' + after.amount +
-                   ', 按钮' + (before.submitEnabled?'已启用':'未启用') + '->' + (after.submitEnabled?'已启用':'未启用'));
+    if (changed || checkCount >= maxChecks) {
+      window.clearInterval(intervalId);
 
-    finish({
-      status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT',
-      before: before,
-      after: after,
-      info: debugInfo.join(' | ')
-    });
-  }, 250);
+      debugInfo.push('📈 状态变化: 选中' + before.selectedCount + '->' + after.selectedCount +
+                     ', 金额￥' + before.amount + '->￥' + after.amount +
+                     ', 按钮' + (before.submitEnabled?'已启用':'未启用') + '->' + (after.submitEnabled?'已启用':'未启用') +
+                     ' (检测' + checkCount + '次)');
+
+      finish({
+        status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT',
+        before: before,
+        after: after,
+        info: debugInfo.join(' | ')
+      });
+    }
+  }, checkInterval);
 } catch (err) {
   var info = '';
   try {
@@ -625,6 +739,21 @@ try {
   finish({ status: 'JS_EXCEPTION', before: null, after: null, info: info });
 }
 """
+
+def quick_check_time_slot(driver, time_text):
+    """快速检查时间段的可用场地数量，返回 (timeFound, availableCount)"""
+    try:
+        result = driver.execute_async_script(QUICK_CHECK_AVAILABILITY_JS, time_text)
+        if isinstance(result, dict):
+            time_found = result.get("timeFound", False)
+            available_count = result.get("availableCount", 0)
+            total_seats = result.get("totalSeats", 0)
+            return time_found, available_count, total_seats
+        return False, 0, 0
+    except Exception as e:
+        log(f"⚠ 快速检查时间段失败：{e}")
+        return False, 0, 0
+
 
 def strict_select_slot(driver, time_text, court_index, config=None):
     """用 JS 执行严格选择；返回 True 表示"选择产生了实际效果" """
@@ -898,7 +1027,11 @@ def wait_success_toast(driver, timeout=4):
     log("未检测到明确成功提示。最近页面文本片段：{}".format(last_text[:60].replace("\n"," ")))
     return False
 
-def booking_flow(driver, config: BookingConfig):
+def booking_flow(driver, config: BookingConfig, start_time_index=0, start_court_index=0):
+    """
+    优化的预订流程，支持从指定位置继续扫描
+    返回: (success, last_time_index, last_court_index)
+    """
     target_date = datetime.now(TZ) + timedelta(days=config.date_offset_days)
     log(
         "准备预约日期：{} (今天+{})".format(
@@ -907,46 +1040,81 @@ def booking_flow(driver, config: BookingConfig):
     )
     if not click_date_tab(driver, target_date):
         log("❌ 日期未选中，无法继续。")
-        return
+        return False, 0, 0
 
-    # 遍历时间行与场地序号
-    for t in config.preferred_slots:
-        for c in config.preferred_courts:
+    # 从指定位置开始遍历时间行与场地序号
+    for time_idx, t in enumerate(config.preferred_slots):
+        # 如果还没到开始位置，跳过
+        if time_idx < start_time_index:
+            continue
+
+        # 快速检查这个时间段是否有可用场地
+        time_found, available_count, total_seats = quick_check_time_slot(driver, t)
+
+        if not time_found:
+            log(f"⏭️ 时间段 {t} 未找到，跳过")
+            continue
+
+        if available_count == 0:
+            log(f"⏭️ 时间段 {t} 无可用场地 (0/{total_seats})，直接跳过")
+            continue
+
+        log(f"✓ 时间段 {t} 发现 {available_count}/{total_seats} 个可用场地，开始抢订")
+
+        # 确定从哪个场地开始
+        start_court = start_court_index if time_idx == start_time_index else 0
+
+        for court_idx, c in enumerate(config.preferred_courts):
+            # 如果还没到开始位置，跳过
+            if court_idx < start_court:
+                continue
+
             ok = False
-            log(f"尝试预约组合：时间 {t}，第{c}块场地")
-            for _ in range(config.click_retries):
+            log(f"尝试预约：时间 {t}，第{c}块场地")
+
+            # 快速重试机制
+            for retry in range(config.click_retries):
                 if strict_select_slot(driver, t, c, config):
                     ok = True
                     break
-                time.sleep(0.05)
+                # 失败后极短延迟重试
+                if retry < config.click_retries - 1:
+                    time.sleep(0.03)
+
             if not ok:
                 continue
 
-            # 选中座位后直接下单，不需要点击右侧图标
-            log(f"✅ 成功选中场地：{t} 第{c}块，准备下单")
-            time.sleep(0.1)  # 快速等待DOM更新
+            # 选中场地后立即下单
+            log(f"✅ 成功选中场地：{t} 第{c}块，立即下单")
 
-            if not click_submit_order_button(driver):
+            # 智能等待下单按钮可用
+            if not smart_wait_for_any_condition(
+                driver,
+                [lambda: click_submit_order_button(driver, timeout=0.5)],
+                timeout=1.5
+            ):
                 log("⚠ 未能点击立即下单按钮，尝试下一组合。")
                 continue
 
-            time.sleep(0.15)
-
             # 处理预订须知对话框（勾选复选框并点击提交订单）
-            if not handle_booking_notice_dialog(driver, timeout=2):
+            if not handle_booking_notice_dialog(driver, timeout=1.5):
                 log("⚠ 未能处理预订须知对话框，尝试下一组合。")
-                continue
+                # 记录失败位置，以便重试时继续
+                return False, time_idx, court_idx
 
-            time.sleep(0.1)
             confirm_if_needed(driver)
 
-            if wait_success_toast(driver, timeout=6):
-                log(f"✅ {c}号场地{t}时间预约成功")
-                return
+            # 快速检测成功提示
+            if wait_success_toast(driver, timeout=4):
+                log(f"🎉🎉🎉 预约成功！场地: {c}号，时间: {t} 🎉🎉🎉")
+                return True, time_idx, court_idx
             else:
-                log(f"⚠ {c}号场地{t}时间预约失败，继续尝试下一组合。")
+                log(f"⚠ {c}号场地{t}时间提交失败，可能被其他人抢走了")
+                # 提交失败，返回失败位置以便立即重试
+                return False, time_idx, court_idx
 
     log("❌ 全部时间与场地组合尝试完毕，未成功。")
+    return False, len(config.preferred_slots) - 1, len(config.preferred_courts) - 1
 
 def parse_args(argv):
     default_config = BookingConfig().with_defaults()
@@ -1041,12 +1209,46 @@ def main(argv=None):
         log("请手动登录体育场馆系统，完成后按 Enter 继续（脚本会在指定时间自动刷新并前往目标场馆/活动）。")
         input("登录完成后按 Enter ... ")
 
+        # 失败重试机制的最大次数
+        max_retry_attempts = 5
+        retry_count = 0
+        last_time_idx = 0
+        last_court_idx = 0
+
         if args.now:
             if not navigate_to_activity(driver, config, force_home=True):
                 log("❌ 无法自动跳转至目标场馆/活动，结束任务。")
                 return
             log("立即执行 (--now)")
-            booking_flow(driver, config)
+
+            # 尝试预约，带重试机制
+            while retry_count < max_retry_attempts:
+                success, last_time_idx, last_court_idx = booking_flow(
+                    driver, config, last_time_idx, last_court_idx
+                )
+
+                if success:
+                    log("🎉🎉🎉 预约成功！任务完成！🎉🎉🎉")
+                    break
+
+                retry_count += 1
+                if retry_count < max_retry_attempts:
+                    log(f"⚠ 提交失败，立即刷新页面重试 (第 {retry_count}/{max_retry_attempts} 次)")
+                    log(f"📍 将从上次位置继续：时间索引 {last_time_idx}，场地索引 {last_court_idx}")
+
+                    # 快速刷新页面
+                    driver.refresh()
+                    wait_document_ready(driver, timeout=5)
+
+                    # 重新导航到场馆
+                    if not navigate_to_activity(driver, config, force_home=False):
+                        log("⚠ 导航失败，尝试从主页重新进入")
+                        if not navigate_to_activity(driver, config, force_home=True):
+                            log("❌ 无法重新进入场馆，结束重试")
+                            break
+                else:
+                    log(f"❌ 已达到最大重试次数 ({max_retry_attempts})，任务结束")
+
         else:
             target_dt = next_open_time(config.open_time_str)
             wait_until(target_dt)
@@ -1063,7 +1265,34 @@ def main(argv=None):
                 if not navigate_to_activity(driver, config, force_home=True):
                     log("❌ 刷新后自动导航失败，结束任务。")
                     return
-            booking_flow(driver, config)
+
+            # 尝试预约，带重试机制
+            while retry_count < max_retry_attempts:
+                success, last_time_idx, last_court_idx = booking_flow(
+                    driver, config, last_time_idx, last_court_idx
+                )
+
+                if success:
+                    log("🎉🎉🎉 预约成功！任务完成！🎉🎉🎉")
+                    break
+
+                retry_count += 1
+                if retry_count < max_retry_attempts:
+                    log(f"⚠ 提交失败，立即刷新页面重试 (第 {retry_count}/{max_retry_attempts} 次)")
+                    log(f"📍 将从上次位置继续：时间索引 {last_time_idx}，场地索引 {last_court_idx}")
+
+                    # 快速刷新页面
+                    driver.refresh()
+                    wait_document_ready(driver, timeout=5)
+
+                    # 重新导航到场馆
+                    if not navigate_to_activity(driver, config, force_home=False):
+                        log("⚠ 导航失败，尝试从主页重新进入")
+                        if not navigate_to_activity(driver, config, force_home=True):
+                            log("❌ 无法重新进入场馆，结束重试")
+                            break
+                else:
+                    log(f"❌ 已达到最大重试次数 ({max_retry_attempts})，任务结束")
 
         log("完成，8 秒后关闭浏览器。")
         time.sleep(8)
