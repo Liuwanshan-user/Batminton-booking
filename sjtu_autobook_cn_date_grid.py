@@ -429,6 +429,7 @@ FIND_FIRST_AVAILABLE_COURT_JS = r"""
 /*
   查找指定时间段内第一个可用的场地
   使用直接索引映射：不读取文字，直接根据时间计算行索引
+  包含等待逻辑：等待座位行加载完成
 
   索引映射规则：
   - 时间格式: "07:00", "08:00", ..., "21:00"
@@ -449,6 +450,22 @@ var done = arguments[arguments.length - 1];
 
 function norm(s) { return String(s || '').trim().replace(/\s+/g, ''); }
 function isVisible(el) { return !!(el && el.offsetParent !== null); }
+
+// 等待并获取座位行的函数
+function getSeatRows(wrapper) {
+  var seatRows = [];
+  var wrapperChildren = Array.from(wrapper.children);
+
+  for (var i = 0; i < wrapperChildren.length; i++) {
+    var child = wrapperChildren[i];
+    if (child.tagName.toLowerCase() === 'ul') continue;
+    if (child.tagName.toLowerCase() === 'div' && child.classList.contains('clearfix')) {
+      seatRows.push(child);
+    }
+  }
+
+  return seatRows;
+}
 
 try {
   var debugInfo = [];
@@ -482,99 +499,107 @@ try {
     return;
   }
 
-  // 步骤3: 等待并获取所有座位行
-  var seatRows = [];
-  var wrapperChildren = Array.from(wrapper.children);
+  // 步骤3: 等待座位行加载（最多等待2秒）
+  var maxWaitTime = 2000; // 2秒
+  var checkInterval = 100; // 每100ms检查一次
+  var startTime = Date.now();
+  var attemptCount = 0;
 
-  // 获取wrapper的直接子元素中的clearfix div（跳过ul元素）
-  for (var i = 0; i < wrapperChildren.length; i++) {
-    var child = wrapperChildren[i];
-    if (child.tagName.toLowerCase() === 'ul') continue;
-    if (child.tagName.toLowerCase() === 'div' && child.classList.contains('clearfix')) {
-      seatRows.push(child);
-    }
-  }
+  var checkSeatRows = function() {
+    attemptCount++;
+    var seatRows = getSeatRows(wrapper);
 
-  debugInfo.push('座位行数:' + seatRows.length + '行');
+    if (seatRows.length > 0) {
+      // 找到座位行了！
+      debugInfo.push('座位行数:' + seatRows.length + '行 (等待' + attemptCount + '次,' + (Date.now() - startTime) + 'ms)');
 
-  // 调试信息：输出wrapper的子元素类型
-  if (debug || seatRows.length === 0) {
-    var childTags = [];
-    for (var i = 0; i < Math.min(wrapperChildren.length, 10); i++) {
-      var c = wrapperChildren[i];
-      var tag = c.tagName.toLowerCase();
-      var cls = c.className || 'no-class';
-      childTags.push(tag + '.' + cls);
-    }
-    debugInfo.push('Wrapper子元素:' + childTags.join(','));
-  }
+      if (rowIndex >= seatRows.length) {
+        done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: debugInfo.join(' | ') + ' | ❌ 行索引' + rowIndex + '超出范围(共' + seatRows.length + '行)' });
+        return;
+      }
 
-  if (seatRows.length === 0) {
-    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: debugInfo.join(' | ') + ' | ❌ 未找到座位行(可能未加载)' });
-    return;
-  }
+      // 步骤4: 直接访问对应行的所有座位
+      var targetRow = seatRows[rowIndex];
+      var allSeats = Array.from(targetRow.children).filter(function(child) {
+        return child.classList.contains('seat');
+      });
 
-  if (rowIndex >= seatRows.length) {
-    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: debugInfo.join(' | ') + ' | ❌ 行索引' + rowIndex + '超出范围(共' + seatRows.length + '行)' });
-    return;
-  }
+      debugInfo.push('目标行座位数:' + allSeats.length);
 
-  // 步骤4: 直接访问对应行的所有座位
-  var targetRow = seatRows[rowIndex];
-  var allSeats = Array.from(targetRow.children).filter(function(child) {
-    return child.classList.contains('seat');
-  });
+      // 步骤5: 查找第一个可用场地
+      for (var j = 0; j < allSeats.length; j++) {
+        var seat = allSeats[j];
+        var innerSeat = seat.querySelector('.inner-seat');
+        if (!innerSeat) continue;
 
-  debugInfo.push('目标行座位数:' + allSeats.length);
+        var innerClass = innerSeat.className || '';
+        var hasUnselectedSeat = innerClass.indexOf('unselected-seat') !== -1;
+        var hasBoughtSeat = innerClass.indexOf('bought-seat') !== -1;
 
-  // 步骤5: 查找第一个可用场地
-  for (var j = 0; j < allSeats.length; j++) {
-    var seat = allSeats[j];
-    var innerSeat = seat.querySelector('.inner-seat');
-    if (!innerSeat) continue;
+        if (hasUnselectedSeat && !hasBoughtSeat && isVisible(seat)) {
+          // 找到第一个可用场地
+          var courtIndex = j + 1; // 1-based
 
-    var innerClass = innerSeat.className || '';
-    var hasUnselectedSeat = innerClass.indexOf('unselected-seat') !== -1;
-    var hasBoughtSeat = innerClass.indexOf('bought-seat') !== -1;
+          // 尝试获取场地名称
+          var courtName = '场地' + courtIndex;
+          try {
+            var topUl = wrapper.querySelector('ul[style*="position"]');
+            if (topUl) {
+              var courtItems = Array.from(topUl.querySelectorAll('li'));
+              if (j < courtItems.length) {
+                courtName = norm(courtItems[j].textContent) || courtName;
+              }
+            }
+          } catch (err) {}
 
-    if (hasUnselectedSeat && !hasBoughtSeat && isVisible(seat)) {
-      // 找到第一个可用场地
-      var courtIndex = j + 1; // 1-based
+          debugInfo.push('✓ 找到第一个可用场地:' + courtName + ' (索引' + courtIndex + ')');
 
-      // 尝试获取场地名称
-      var courtName = '场地' + courtIndex;
-      try {
-        var topUl = wrapper.querySelector('ul[style*="position"]');
-        if (topUl) {
-          var courtItems = Array.from(topUl.querySelectorAll('li'));
-          if (j < courtItems.length) {
-            courtName = norm(courtItems[j].textContent) || courtName;
-          }
+          done({
+            found: true,
+            courtIndex: courtIndex,
+            courtName: courtName,
+            totalSeats: allSeats.length,
+            debugInfo: debugInfo.join(' | ')
+          });
+          return;
         }
-      } catch (err) {}
+      }
 
-      debugInfo.push('✓ 找到第一个可用场地:' + courtName + ' (索引' + courtIndex + ')');
-
+      // 未找到可用场地
+      debugInfo.push('❌ 该时间段无可用场地');
       done({
-        found: true,
-        courtIndex: courtIndex,
-        courtName: courtName,
+        found: false,
+        courtIndex: 0,
+        courtName: '',
         totalSeats: allSeats.length,
         debugInfo: debugInfo.join(' | ')
       });
       return;
     }
-  }
 
-  // 未找到可用场地
-  debugInfo.push('❌ 该时间段无可用场地');
-  done({
-    found: false,
-    courtIndex: 0,
-    courtName: '',
-    totalSeats: allSeats.length,
-    debugInfo: debugInfo.join(' | ')
-  });
+    // 还没找到座位行，检查是否超时
+    if (Date.now() - startTime >= maxWaitTime) {
+      // 超时了，输出调试信息
+      var wrapperChildren = Array.from(wrapper.children);
+      var childTags = [];
+      for (var i = 0; i < Math.min(wrapperChildren.length, 10); i++) {
+        var c = wrapperChildren[i];
+        var tag = c.tagName.toLowerCase();
+        var cls = c.className || 'no-class';
+        childTags.push(tag + '.' + cls);
+      }
+      debugInfo.push('等待超时(' + maxWaitTime + 'ms,' + attemptCount + '次)');
+      debugInfo.push('Wrapper子元素:' + childTags.join(','));
+      done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: debugInfo.join(' | ') + ' | ❌ 未找到座位行' });
+      return;
+    }
+
+    // 继续等待
+    setTimeout(checkSeatRows, checkInterval);
+  };
+
+  // 开始检查
+  checkSeatRows();
 
 } catch (err) {
   done({
@@ -592,6 +617,7 @@ QUICK_CHECK_AVAILABILITY_JS = r"""
 /*
   快速检查指定时间段的可用场地数量
   使用直接索引映射：不读取文字，直接根据时间计算行索引
+  包含等待逻辑：等待座位行加载完成
 
   索引映射规则：
   - 时间格式: "07:00", "08:00", ..., "21:00"
@@ -604,6 +630,22 @@ var done = arguments[arguments.length - 1];
 
 function norm(s) { return String(s || '').trim().replace(/\s+/g, ''); }
 function isVisible(el) { return !!(el && el.offsetParent !== null); }
+
+// 等待并获取座位行的函数
+function getSeatRows(wrapper) {
+  var seatRows = [];
+  var wrapperChildren = Array.from(wrapper.children);
+
+  for (var i = 0; i < wrapperChildren.length; i++) {
+    var child = wrapperChildren[i];
+    if (child.tagName.toLowerCase() === 'ul') continue;
+    if (child.tagName.toLowerCase() === 'div' && child.classList.contains('clearfix')) {
+      seatRows.push(child);
+    }
+  }
+
+  return seatRows;
+}
 
 try {
   var debugInfo = [];
@@ -641,112 +683,120 @@ try {
     return;
   }
 
-  // 步骤3: 获取所有座位行
-  var seatRows = [];
-  var wrapperChildren = Array.from(wrapper.children);
+  // 步骤3: 等待座位行加载（最多等待2秒）
+  var maxWaitTime = 2000; // 2秒
+  var checkInterval = 100; // 每100ms检查一次
+  var startTime = Date.now();
+  var attemptCount = 0;
 
-  // 获取wrapper的直接子元素中的clearfix div（跳过ul元素）
-  for (var i = 0; i < wrapperChildren.length; i++) {
-    var child = wrapperChildren[i];
-    if (child.tagName.toLowerCase() === 'ul') continue;
-    if (child.tagName.toLowerCase() === 'div' && child.classList.contains('clearfix')) {
-      seatRows.push(child);
-    }
-  }
+  var checkSeatRows = function() {
+    attemptCount++;
+    var seatRows = getSeatRows(wrapper);
 
-  debugInfo.push('座位行数:' + seatRows.length + '行');
+    if (seatRows.length > 0) {
+      // 找到座位行了！
+      debugInfo.push('座位行数:' + seatRows.length + '行 (等待' + attemptCount + '次,' + (Date.now() - startTime) + 'ms)');
 
-  // 调试：输出wrapper的子元素类型
-  if (debug || seatRows.length === 0) {
-    var childTags = [];
-    for (var i = 0; i < Math.min(wrapperChildren.length, 10); i++) {
-      var c = wrapperChildren[i];
-      var tag = c.tagName.toLowerCase();
-      var cls = c.className || 'no-class';
-      childTags.push(tag + '.' + cls);
-    }
-    debugInfo.push('Wrapper子元素:' + childTags.join(','));
-  }
+      // 输出每行的座位数量用于调试
+      if (debug) {
+        var rowInfo = [];
+        for (var i = 0; i < Math.min(seatRows.length, 20); i++) {
+          var rowSeats = Array.from(seatRows[i].children).filter(function(child) {
+            return child.classList.contains('seat');
+          });
+          // 统计该行的状态
+          var bCount = 0, uCount = 0;
+          for (var j = 0; j < rowSeats.length; j++) {
+            var innerSeat = rowSeats[j].querySelector('.inner-seat');
+            if (innerSeat) {
+              var cls = innerSeat.className || '';
+              if (cls.indexOf('bought-seat') !== -1) bCount++;
+              else if (cls.indexOf('unselected-seat') !== -1) uCount++;
+            }
+          }
+          rowInfo.push(i + ':' + rowSeats.length + '座(' + uCount + '可用,' + bCount + '已订)');
+        }
+        debugInfo.push('座位行明细=' + rowInfo.join(','));
+      }
 
-  // 输出每行的座位数量用于调试
-  if (debug) {
-    var rowInfo = [];
-    for (var i = 0; i < Math.min(seatRows.length, 20); i++) {
-      var rowSeats = Array.from(seatRows[i].children).filter(function(child) {
+      if (rowIndex >= seatRows.length) {
+        debugInfo.push('❌ 行索引' + rowIndex + '超出范围(共' + seatRows.length + '行)');
+        done({ timeFound: true, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
+        return;
+      }
+
+      // 步骤4: 直接访问对应行的所有座位
+      var targetRow = seatRows[rowIndex];
+      var allSeats = Array.from(targetRow.children).filter(function(child) {
         return child.classList.contains('seat');
       });
-      // 统计该行的状态
-      var boughtCount = 0, unselectedCount = 0;
-      for (var j = 0; j < rowSeats.length; j++) {
-        var innerSeat = rowSeats[j].querySelector('.inner-seat');
-        if (innerSeat) {
-          var cls = innerSeat.className || '';
-          if (cls.indexOf('bought-seat') !== -1) boughtCount++;
-          else if (cls.indexOf('unselected-seat') !== -1) unselectedCount++;
+
+      debugInfo.push('目标行座位数:' + allSeats.length);
+
+      var availableCount = 0;
+      var boughtCount = 0;
+
+      // 步骤5: 遍历该行所有座位，统计可用和已订数量
+      for (var j = 0; j < allSeats.length; j++) {
+        var seat = allSeats[j];
+        var innerSeat = seat.querySelector('.inner-seat');
+        if (!innerSeat) continue;
+
+        var innerClass = innerSeat.className || '';
+
+        // 收集前3个座位的class作为样本（用于调试）
+        if (sampleClasses.length < 3) {
+          sampleClasses.push(innerClass);
+        }
+
+        // 精确匹配：bought-seat = 已订，unselected-seat = 可选
+        var hasBoughtSeat = innerClass.indexOf('bought-seat') !== -1;
+        var hasUnselectedSeat = innerClass.indexOf('unselected-seat') !== -1;
+
+        if (hasBoughtSeat) {
+          boughtCount++;
+        } else if (hasUnselectedSeat && isVisible(seat)) {
+          availableCount++;
         }
       }
-      rowInfo.push(i + ':' + rowSeats.length + '座(' + unselectedCount + '可用,' + boughtCount + '已订)');
-    }
-    debugInfo.push('座位行明细=' + rowInfo.join(','));
-  }
 
-  if (seatRows.length === 0) {
-    debugInfo.push('❌ 未找到座位行(可能未加载)');
-    done({ timeFound: false, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
-    return;
-  }
+      debugInfo.push('统计结果: 可用=' + availableCount + ' 已订=' + boughtCount + ' 总计=' + allSeats.length);
 
-  if (rowIndex >= seatRows.length) {
-    debugInfo.push('❌ 行索引' + rowIndex + '超出范围(共' + seatRows.length + '行)');
-    done({ timeFound: true, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
-    return;
-  }
-
-  // 步骤4: 直接访问对应行的所有座位
-  var targetRow = seatRows[rowIndex];
-  var allSeats = Array.from(targetRow.children).filter(function(child) {
-    return child.classList.contains('seat');
-  });
-
-  debugInfo.push('目标行座位数:' + allSeats.length);
-
-  var availableCount = 0;
-  var boughtCount = 0;
-
-  // 步骤5: 遍历该行所有座位，统计可用和已订数量
-  for (var j = 0; j < allSeats.length; j++) {
-    var seat = allSeats[j];
-    var innerSeat = seat.querySelector('.inner-seat');
-    if (!innerSeat) continue;
-
-    var innerClass = innerSeat.className || '';
-
-    // 收集前3个座位的class作为样本（用于调试）
-    if (sampleClasses.length < 3) {
-      sampleClasses.push(innerClass);
+      done({
+        timeFound: true,
+        availableCount: availableCount,
+        totalSeats: allSeats.length,
+        boughtCount: boughtCount,
+        debugInfo: debugInfo.join(' | '),
+        sampleClasses: sampleClasses
+      });
+      return;
     }
 
-    // 精确匹配：bought-seat = 已订，unselected-seat = 可选
-    var hasBoughtSeat = innerClass.indexOf('bought-seat') !== -1;
-    var hasUnselectedSeat = innerClass.indexOf('unselected-seat') !== -1;
-
-    if (hasBoughtSeat) {
-      boughtCount++;
-    } else if (hasUnselectedSeat && isVisible(seat)) {
-      availableCount++;
+    // 还没找到座位行，检查是否超时
+    if (Date.now() - startTime >= maxWaitTime) {
+      // 超时了，输出调试信息
+      var wrapperChildren = Array.from(wrapper.children);
+      var childTags = [];
+      for (var i = 0; i < Math.min(wrapperChildren.length, 10); i++) {
+        var c = wrapperChildren[i];
+        var tag = c.tagName.toLowerCase();
+        var cls = c.className || 'no-class';
+        childTags.push(tag + '.' + cls);
+      }
+      debugInfo.push('等待超时(' + maxWaitTime + 'ms,' + attemptCount + '次)');
+      debugInfo.push('Wrapper子元素:' + childTags.join(','));
+      done({ timeFound: false, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
+      return;
     }
-  }
 
-  debugInfo.push('统计结果: 可用=' + availableCount + ' 已订=' + boughtCount + ' 总计=' + allSeats.length);
+    // 继续等待
+    setTimeout(checkSeatRows, checkInterval);
+  };
 
-  done({
-    timeFound: true,
-    availableCount: availableCount,
-    totalSeats: allSeats.length,
-    boughtCount: boughtCount,
-    debugInfo: debugInfo.join(' | '),
-    sampleClasses: sampleClasses
-  });
+  // 开始检查
+  checkSeatRows();
+
 } catch (err) {
   done({
     timeFound: false,
@@ -763,6 +813,7 @@ try {
 STRICT_CHECK_JS = r"""
 /*
   使用直接索引映射：不读取文字，直接根据时间计算行索引
+  包含等待逻辑：等待座位行加载完成
 
   索引映射规则：
   - 时间格式: "07:00", "08:00", ..., "21:00"
@@ -795,6 +846,22 @@ function finish(payload) {
 
 function norm(s) { return String(s || '').trim().replace(/\s+/g, ''); }
 function isVisible(el) { return !!(el && el.offsetParent !== null); }
+
+// 等待并获取座位行的函数
+function getSeatRows(wrapper) {
+  var seatRows = [];
+  var wrapperChildren = Array.from(wrapper.children);
+
+  for (var i = 0; i < wrapperChildren.length; i++) {
+    var child = wrapperChildren[i];
+    if (child.tagName.toLowerCase() === 'ul') continue;
+    if (child.tagName.toLowerCase() === 'div' && child.classList.contains('clearfix')) {
+      seatRows.push(child);
+    }
+  }
+
+  return seatRows;
+}
 
 function getPanelState() {
   var selectedCount = 0, amount = 0.0, submitEnabled = false;
@@ -861,141 +928,161 @@ try {
     return;
   }
 
-  // 获取所有座位行
-  var seatRows = [];
-  var wrapperChildren = Array.from(wrapper.children);
+  // ========== 步骤3: 等待座位行加载（最多等待2秒） ==========
+  var maxWaitTime = 2000; // 2秒
+  var checkInterval = 100; // 每100ms检查一次
+  var startTime = Date.now();
+  var attemptCount = 0;
 
-  // 获取wrapper的直接子元素中的clearfix div（跳过ul元素）
-  for (var i = 0; i < wrapperChildren.length; i++) {
-    var child = wrapperChildren[i];
-    if (child.tagName.toLowerCase() === 'ul') continue;
-    if (child.tagName.toLowerCase() === 'div' && child.classList.contains('clearfix')) {
-      seatRows.push(child);
-    }
-  }
+  var processSeatSelection = function() {
+    attemptCount++;
+    var seatRows = getSeatRows(wrapper);
 
-  debugInfo.push('座位行数:' + seatRows.length + '行');
+    if (seatRows.length > 0) {
+      // 找到座位行了！
+      debugInfo.push('座位行数:' + seatRows.length + '行 (等待' + attemptCount + '次,' + (Date.now() - startTime) + 'ms)');
 
-  if (seatRows.length === 0) {
-    debugInfo.push('❌ 未找到座位行(可能未加载)');
-    finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
-    return;
-  }
+      if (rowIndex >= seatRows.length) {
+        debugInfo.push('❌ 行索引' + rowIndex + '超出范围(共' + seatRows.length + '行)');
+        finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
+        return;
+      }
 
-  if (rowIndex >= seatRows.length) {
-    debugInfo.push('❌ 行索引' + rowIndex + '超出范围(共' + seatRows.length + '行)');
-    finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
-    return;
-  }
-
-  // ========== 步骤3: 直接访问对应行的所有座位 ==========
-  var targetRow = seatRows[rowIndex];
-  var allSeats = Array.from(targetRow.children).filter(function(child) {
-    return child.classList.contains('seat');
-  });
-
-  debugInfo.push('目标行座位数:' + allSeats.length);
-
-  if (courtIndex > allSeats.length) {
-    debugInfo.push('❌ 场地' + courtIndex + '超出范围(共' + allSeats.length + '个)');
-    finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
-    return;
-  }
-
-  // ========== 步骤4: 选择指定场地（场地编号从1开始，数组索引从0开始） ==========
-  var targetSeat = allSeats[courtIndex - 1];
-  var innerSeat = targetSeat.querySelector('.inner-seat');
-
-  if (!innerSeat) {
-    debugInfo.push('❌ 场地' + courtIndex + '没有inner-seat');
-    finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
-    return;
-  }
-
-  var innerClass = innerSeat.className || '';
-  debugInfo.push('场地' + courtIndex + ':' + innerClass);
-
-  // 检查是否可用
-  var hasBoughtSeat = innerClass.indexOf('bought-seat') !== -1;
-  var hasUnselectedSeat = innerClass.indexOf('unselected-seat') !== -1;
-
-  if (hasBoughtSeat) {
-    debugInfo.push('❌ 场地' + courtIndex + '已被预订(bought-seat)');
-    finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
-    return;
-  }
-
-  if (!hasUnselectedSeat) {
-    debugInfo.push('❌ 场地' + courtIndex + '不可选(无unselected-seat)');
-    finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
-    return;
-  }
-
-  debugInfo.push('✓ 场地' + courtIndex + '可用(unselected-seat)');
-
-  // ========== 步骤5: 点击场地 ==========
-  try {
-    targetSeat.scrollIntoView({ block: 'center' });
-  } catch (err) {
-    debugInfo.push('⚠️ scrollIntoView失败');
-  }
-
-  var clickSuccess = false;
-  var clickMethods = [
-    function() { innerSeat.click(); return 'inner-seat.click()'; },
-    function() { targetSeat.click(); return 'seat.click()'; },
-    function() {
-      var evt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
-      innerSeat.dispatchEvent(evt);
-      return 'innerSeat.dispatchEvent';
-    }
-  ];
-
-  for (var m = 0; m < clickMethods.length; m++) {
-    try {
-      var methodName = clickMethods[m]();
-      debugInfo.push('🖱️ ' + methodName);
-      clickSuccess = true;
-      break;
-    } catch (err) {
-      debugInfo.push('⚠️ 方法' + (m+1) + '失败');
-    }
-  }
-
-  if (!clickSuccess) {
-    debugInfo.push('❌ 所有点击方法都失败');
-    finish({ status: 'CLICK_NO_EFFECT', before: before, after: before, info: debugInfo.join(' | ') });
-    return;
-  }
-
-  // ========== 步骤6: 检测右侧面板状态变化 ==========
-  var checkCount = 0;
-  var maxChecks = 10;
-  var checkInterval = 50;
-
-  var intervalId = window.setInterval(function () {
-    checkCount++;
-    var after = getPanelState();
-    var changed = (after.selectedCount > before.selectedCount) ||
-      (after.amount > before.amount) ||
-      (!before.submitEnabled && after.submitEnabled);
-
-    if (changed || checkCount >= maxChecks) {
-      window.clearInterval(intervalId);
-
-      debugInfo.push('状态:选中' + before.selectedCount + '→' + after.selectedCount +
-                     ' 金额￥' + before.amount + '→￥' + after.amount +
-                     ' 下单按钮:' + (before.submitEnabled ? '可用' : '不可用') + '→' + (after.submitEnabled ? '可用' : '不可用') +
-                     ' (轮询' + checkCount + '次)');
-
-      finish({
-        status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT',
-        before: before,
-        after: after,
-        info: debugInfo.join(' | ')
+      // 步骤4: 直接访问对应行的所有座位
+      var targetRow = seatRows[rowIndex];
+      var allSeats = Array.from(targetRow.children).filter(function(child) {
+        return child.classList.contains('seat');
       });
+
+      debugInfo.push('目标行座位数:' + allSeats.length);
+
+      if (courtIndex > allSeats.length) {
+        debugInfo.push('❌ 场地' + courtIndex + '超出范围(共' + allSeats.length + '个)');
+        finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
+        return;
+      }
+
+      // 步骤5: 选择指定场地（场地编号从1开始，数组索引从0开始）
+      var targetSeat = allSeats[courtIndex - 1];
+      var innerSeat = targetSeat.querySelector('.inner-seat');
+
+      if (!innerSeat) {
+        debugInfo.push('❌ 场地' + courtIndex + '没有inner-seat');
+        finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
+        return;
+      }
+
+      var innerClass = innerSeat.className || '';
+      debugInfo.push('场地' + courtIndex + ':' + innerClass);
+
+      // 检查是否可用
+      var hasBoughtSeat = innerClass.indexOf('bought-seat') !== -1;
+      var hasUnselectedSeat = innerClass.indexOf('unselected-seat') !== -1;
+
+      if (hasBoughtSeat) {
+        debugInfo.push('❌ 场地' + courtIndex + '已被预订(bought-seat)');
+        finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
+        return;
+      }
+
+      if (!hasUnselectedSeat) {
+        debugInfo.push('❌ 场地' + courtIndex + '不可选(无unselected-seat)');
+        finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
+        return;
+      }
+
+      debugInfo.push('✓ 场地' + courtIndex + '可用(unselected-seat)');
+
+      // 步骤6: 点击场地
+      try {
+        targetSeat.scrollIntoView({ block: 'center' });
+      } catch (err) {
+        debugInfo.push('⚠️ scrollIntoView失败');
+      }
+
+      var clickSuccess = false;
+      var clickMethods = [
+        function() { innerSeat.click(); return 'inner-seat.click()'; },
+        function() { targetSeat.click(); return 'seat.click()'; },
+        function() {
+          var evt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+          innerSeat.dispatchEvent(evt);
+          return 'innerSeat.dispatchEvent';
+        }
+      ];
+
+      for (var m = 0; m < clickMethods.length; m++) {
+        try {
+          var methodName = clickMethods[m]();
+          debugInfo.push('🖱️ ' + methodName);
+          clickSuccess = true;
+          break;
+        } catch (err) {
+          debugInfo.push('⚠️ 方法' + (m+1) + '失败');
+        }
+      }
+
+      if (!clickSuccess) {
+        debugInfo.push('❌ 所有点击方法都失败');
+        finish({ status: 'CLICK_NO_EFFECT', before: before, after: before, info: debugInfo.join(' | ') });
+        return;
+      }
+
+      // 步骤7: 检测右侧面板状态变化
+      var checkCount = 0;
+      var maxChecks = 10;
+      var checkInterval2 = 50;
+
+      var intervalId = window.setInterval(function () {
+        checkCount++;
+        var after = getPanelState();
+        var changed = (after.selectedCount > before.selectedCount) ||
+          (after.amount > before.amount) ||
+          (!before.submitEnabled && after.submitEnabled);
+
+        if (changed || checkCount >= maxChecks) {
+          window.clearInterval(intervalId);
+
+          debugInfo.push('状态:选中' + before.selectedCount + '→' + after.selectedCount +
+                         ' 金额￥' + before.amount + '→￥' + after.amount +
+                         ' 下单按钮:' + (before.submitEnabled ? '可用' : '不可用') + '→' + (after.submitEnabled ? '可用' : '不可用') +
+                         ' (轮询' + checkCount + '次)');
+
+          finish({
+            status: changed ? 'OK_SELECTED' : 'CLICK_NO_EFFECT',
+            before: before,
+            after: after,
+            info: debugInfo.join(' | ')
+          });
+        }
+      }, checkInterval2);
+      return;
     }
-  }, checkInterval);
+
+    // 还没找到座位行，检查是否超时
+    if (Date.now() - startTime >= maxWaitTime) {
+      // 超时了，输出调试信息
+      var wrapperChildren = Array.from(wrapper.children);
+      var childTags = [];
+      for (var i = 0; i < Math.min(wrapperChildren.length, 10); i++) {
+        var c = wrapperChildren[i];
+        var tag = c.tagName.toLowerCase();
+        var cls = c.className || 'no-class';
+        childTags.push(tag + '.' + cls);
+      }
+      debugInfo.push('等待超时(' + maxWaitTime + 'ms,' + attemptCount + '次)');
+      debugInfo.push('Wrapper子元素:' + childTags.join(','));
+      finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
+      return;
+    }
+
+    // 继续等待
+    setTimeout(processSeatSelection, checkInterval);
+  };
+
+  // 开始处理
+  processSeatSelection();
+
 } catch (err) {
   var info = '';
   try {
