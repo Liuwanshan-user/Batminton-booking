@@ -482,12 +482,18 @@ try {
   }
 
   // 4. 获取所有座位行（每个 div.clearfix 是一行）
-  // 跳过第一个clearfix（那是场地标题行）
-  var allRows = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
-  var seatRows = allRows.filter(function(row) {
-    // 座位行应该包含 div.seat 元素
-    return row.querySelector('div.seat') !== null;
-  });
+  // 只选择直接包含 div.seat 子元素的 clearfix
+  var allClearfixDivs = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
+  var seatRows = [];
+
+  for (var i = 0; i < allClearfixDivs.length; i++) {
+    var row = allClearfixDivs[i];
+    // 只选择直接包含多个 div.seat 子元素的 clearfix
+    var directSeats = Array.from(row.querySelectorAll(':scope > div.seat'));
+    if (directSeats.length > 0) {
+      seatRows.push(row);
+    }
+  }
 
   debugInfo.push('找到' + seatRows.length + '个座位行');
 
@@ -650,12 +656,27 @@ try {
     return;
   }
 
-  // 4. 获取所有座位行（过滤出包含 div.seat 的行）
-  var allRows = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
-  var seatRows = allRows.filter(function(row) {
-    return row.querySelector('div.seat') !== null;
-  });
-  debugInfo.push('✓ 找到座位行数:' + seatRows.length);
+  // 4. 获取所有座位行（每个 div.clearfix 是一行）
+  // 需要选择正确的座位行：排除外层容器clearfix，只要包含多个seat的clearfix
+  var allClearfixDivs = Array.from(tablesDiv.querySelectorAll('div.clearfix'));
+  var seatRows = [];
+
+  for (var i = 0; i < allClearfixDivs.length; i++) {
+    var row = allClearfixDivs[i];
+    // 只选择直接包含多个 div.seat 子元素的 clearfix
+    var directSeats = Array.from(row.querySelectorAll(':scope > div.seat'));
+    if (directSeats.length > 0) {
+      seatRows.push(row);
+    }
+  }
+
+  debugInfo.push('找到' + seatRows.length + '个座位行');
+
+  if (seatRows.length === 0) {
+    debugInfo.push('❌ 未找到任何座位行');
+    finish({ status: 'ROW_OR_BUTTON_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
+    return;
+  }
 
   if (timeIndex >= seatRows.length) {
     debugInfo.push('❌ 时间索引超出座位行范围:' + timeIndex + '>=' + seatRows.length);
@@ -1167,17 +1188,16 @@ def booking_flow(driver, config: BookingConfig, start_time_index=0, start_court_
             log(f"⏭️ 时间段 {t} 未找到，跳过")
             continue
 
-        # 改进策略：即使显示0个可用，也至少尝试第一个场地（防止误判）
-        if available_count == 0:
-            if bought_count == total_seats and total_seats > 0:
-                # 所有场地都已被订，确定跳过
-                log(f"⏭️ 时间段 {t} 全部已订 ({bought_count}/{total_seats})，跳过")
-                continue
-            else:
-                # 可能是检测误判，至少尝试第一个场地
-                log(f"⚠️ 时间段 {t} 快速检查显示无可用场地，但仍会尝试（可能误判）")
+        # 快速跳过策略：如果所有场地都已订，直接跳过
+        if available_count == 0 and bought_count == total_seats and total_seats > 0:
+            # 所有场地都已被订，确定跳过
+            log(f"⏭️ 时间段 {t} 全部已订 ({bought_count}/{total_seats})，快速跳过")
+            continue
+
+        if available_count > 0:
+            log(f"✓ 时间段 {t} 发现 {available_count}/{total_seats} 个可用场地，尝试指定场地")
         else:
-            log(f"✓ 时间段 {t} 发现 {available_count}/{total_seats} 个可用场地，开始抢订")
+            log(f"⚠️ 时间段 {t} 检测显示0个可用，仍会尝试用户指定的场地")
 
         # 确定从哪个场地开始
         start_court = start_court_index if time_idx == start_time_index else 0

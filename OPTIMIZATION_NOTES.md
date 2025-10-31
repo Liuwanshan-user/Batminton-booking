@@ -63,6 +63,58 @@ python sjtu_autobook_cn_date_grid.py --date-offset 7 --slots "18:00,19:00" --cou
 
 ## 修复记录
 
+### 2025-10-31 修复时间索引和优化跳过逻辑（第4版）
+
+**问题1 - 时间索引对不上**：
+- 现象：选择18:00但预订到了其他时间
+- 原因：座位行选择器选中了错误的clearfix（包括容器clearfix）
+- 修复：使用`:scope > div.seat`精确选择直接包含seat子元素的clearfix
+
+**旧逻辑**：
+```javascript
+// 选中所有包含seat的clearfix（包括外层容器）
+var seatRows = allRows.filter(function(row) {
+  return row.querySelector('div.seat') !== null;
+});
+```
+
+**新逻辑**：
+```javascript
+// 只选择直接包含seat子元素的clearfix
+var directSeats = Array.from(row.querySelectorAll(':scope > div.seat'));
+if (directSeats.length > 0) {
+  seatRows.push(row);
+}
+```
+
+**问题2 - 全部已订时仍然尝试**：
+- 旧行为：即使所有场地都已订，还是会尝试点击
+- 新行为：检测到全部已订，立即跳到下一个时间段
+
+**时间和行的对应关系**：
+```
+左侧时间列表    座位行索引    实际时间
+li[0] 07:00  →  seatRows[0]  →  07:00
+li[1] 08:00  →  seatRows[1]  →  08:00
+li[2] 09:00  →  seatRows[2]  →  09:00
+...
+li[11] 18:00 →  seatRows[11] →  18:00
+li[12] 19:00 →  seatRows[12] →  19:00
+```
+
+**日志示例**：
+```
+✓ 时间段 18:00 发现 3/16 个可用场地，尝试指定场地
+尝试预约：时间 18:00，第3块场地
+🎯 目标场地3 class: inner-seat unselected-seat
+✓ 场地3可用，准备点击
+```
+
+全部已订时：
+```
+⏭️ 时间段 18:00 全部已订 (16/16)，快速跳过
+```
+
 ### 2025-10-31 修复场地选择逻辑（第3版）
 
 **问题1 - 场地选择错误**：
