@@ -428,6 +428,13 @@ def click_date_tab(driver, target_date):
 FIND_FIRST_AVAILABLE_COURT_JS = r"""
 /*
   查找指定时间段内第一个可用的场地
+  使用直接索引映射：不读取文字，直接根据时间计算行索引
+
+  索引映射规则：
+  - 时间格式: "07:00", "08:00", ..., "21:00"
+  - 行索引: 07:00 -> 0, 08:00 -> 1, ..., 18:00 -> 11, ..., 21:00 -> 14
+  - 计算公式: rowIndex = hour - 7
+
   返回: {
     found: true/false,
     courtIndex: 场地编号(1-based),
@@ -445,59 +452,50 @@ function isVisible(el) { return !!(el && el.offsetParent !== null); }
 
 try {
   var debugInfo = [];
+  debugInfo.push('🎯 目标时间:' + timeText);
 
-  // 步骤1: 查找左侧时间列表
-  var leftUl = document.querySelector('ul.leftUl');
-  if (!leftUl) {
-    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: '❌ 未找到 ul.leftUl' });
-    return;
-  }
-
-  // 步骤2: 在左侧列表中查找时间索引
-  var timeItems = Array.from(leftUl.querySelectorAll('li'));
-  var timeIndex = -1;
-  for (var i = 0; i < timeItems.length; i++) {
-    if (norm(timeItems[i].textContent) === norm(timeText)) {
-      timeIndex = i;
-      break;
+  // 步骤1: 解析时间字符串，直接计算行索引
+  var hour = -1;
+  try {
+    var parts = timeText.split(':');
+    if (parts.length >= 1) {
+      hour = parseInt(parts[0], 10);
     }
-  }
-
-  if (timeIndex === -1) {
-    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: '❌ 未找到时间"' + timeText + '"' });
+  } catch (err) {
+    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: '❌ 时间格式错误:' + timeText });
     return;
   }
 
-  debugInfo.push('✓ 时间"' + timeText + '"→索引' + timeIndex);
+  if (hour < 7 || hour > 21) {
+    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: '❌ 时间超出范围(7-21):' + hour });
+    return;
+  }
 
-  // 步骤3: 获取右侧座位容器
+  // 直接计算行索引：7点=0, 8点=1, ..., 18点=11, ..., 21点=14
+  var rowIndex = hour - 7;
+  debugInfo.push('✓ 时间' + timeText + '→行索引' + rowIndex + ' (计算:' + hour + '-7)');
+
+  // 步骤2: 获取右侧座位容器
   var wrapper = document.querySelector('div.inner-seat-wrapper.clearfix');
   if (!wrapper) {
-    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: '❌ 未找到 div.inner-seat-wrapper.clearfix' });
+    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: debugInfo.join(' | ') + ' | ❌ 未找到wrapper' });
     return;
   }
 
-  // 步骤4: 获取所有座位行（改进选择策略）
+  // 步骤3: 等待并获取所有座位行
   var seatRows = [];
-
-  // 策略1: 获取wrapper的直接子元素中的clearfix div
   var wrapperChildren = Array.from(wrapper.children);
+
+  // 获取wrapper的直接子元素中的clearfix div（跳过ul元素）
   for (var i = 0; i < wrapperChildren.length; i++) {
     var child = wrapperChildren[i];
-    // 跳过ul元素（场地名称）
     if (child.tagName.toLowerCase() === 'ul') continue;
-    // 只选择div.clearfix
     if (child.tagName.toLowerCase() === 'div' && child.classList.contains('clearfix')) {
       seatRows.push(child);
     }
   }
 
-  // 策略2: 如果策略1失败，尝试用querySelectorAll
-  if (seatRows.length === 0) {
-    debugInfo.push('策略1失败，尝试策略2');
-    var allClearfix = wrapper.querySelectorAll(':scope > div.clearfix');
-    seatRows = Array.from(allClearfix);
-  }
+  debugInfo.push('座位行数:' + seatRows.length + '行');
 
   // 调试信息：输出wrapper的子元素类型
   if (debug || seatRows.length === 0) {
@@ -508,28 +506,28 @@ try {
       var cls = c.className || 'no-class';
       childTags.push(tag + '.' + cls);
     }
-    debugInfo.push('Wrapper子元素[前10个]:' + childTags.join(','));
+    debugInfo.push('Wrapper子元素:' + childTags.join(','));
   }
 
   if (seatRows.length === 0) {
-    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: debugInfo.join(' | ') + ' | ❌ 未找到任何座位行' });
+    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: debugInfo.join(' | ') + ' | ❌ 未找到座位行(可能未加载)' });
     return;
   }
 
-  if (timeIndex >= seatRows.length) {
-    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: debugInfo.join(' | ') + ' | ❌ 时间索引超出范围' });
+  if (rowIndex >= seatRows.length) {
+    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: debugInfo.join(' | ') + ' | ❌ 行索引' + rowIndex + '超出范围(共' + seatRows.length + '行)' });
     return;
   }
 
-  // 步骤5: 获取对应时间行的所有座位
-  var targetRow = seatRows[timeIndex];
+  // 步骤4: 直接访问对应行的所有座位
+  var targetRow = seatRows[rowIndex];
   var allSeats = Array.from(targetRow.children).filter(function(child) {
     return child.classList.contains('seat');
   });
 
   debugInfo.push('目标行座位数:' + allSeats.length);
 
-  // 步骤6: 查找第一个可用场地
+  // 步骤5: 查找第一个可用场地
   for (var j = 0; j < allSeats.length; j++) {
     var seat = allSeats[j];
     var innerSeat = seat.querySelector('.inner-seat');
@@ -555,7 +553,7 @@ try {
         }
       } catch (err) {}
 
-      debugInfo.push('✓ 找到第一个可用场地: ' + courtName + ' (索引' + courtIndex + ')');
+      debugInfo.push('✓ 找到第一个可用场地:' + courtName + ' (索引' + courtIndex + ')');
 
       done({
         found: true,
@@ -593,18 +591,12 @@ try {
 QUICK_CHECK_AVAILABILITY_JS = r"""
 /*
   快速检查指定时间段的可用场地数量
-  基于DOM_STRUCTURE_ANALYSIS.md重写，使用精确的DOM遍历策略
+  使用直接索引映射：不读取文字，直接根据时间计算行索引
 
-  DOM结构：
-  ul.leftUl > li[0]=07:00, li[1]=08:00, ..., li[15]=22:00
-  div.tables > ... > div.clearfix(容器) > div.clearfix(座位行)
-
-  选择策略：
-  1. 找到 div.tables
-  2. 获取所有 div.clearfix
-  3. 使用 .children 过滤：只保留直接包含 div.seat 子元素的 clearfix
-  4. seatRows[timeIndex] = 对应时间的座位行
-  5. seats[courtIndex-1] = 指定编号的场地
+  索引映射规则：
+  - 时间格式: "07:00", "08:00", ..., "21:00"
+  - 行索引: 07:00 -> 0, 08:00 -> 1, ..., 18:00 -> 11, ..., 21:00 -> 14
+  - 计算公式: rowIndex = hour - 7
 */
 var timeText = arguments[0];
 var debug = arguments[1] || false;
@@ -616,105 +608,64 @@ function isVisible(el) { return !!(el && el.offsetParent !== null); }
 try {
   var debugInfo = [];
   var sampleClasses = [];
+  debugInfo.push('🎯 目标时间:' + timeText);
 
-  // 步骤1: 查找左侧时间列表 ul.leftUl
-  var leftUl = document.querySelector('ul.leftUl');
-  if (!leftUl) {
-    debugInfo.push('❌ 未找到 ul.leftUl');
+  // 步骤1: 解析时间字符串，直接计算行索引
+  var hour = -1;
+  try {
+    var parts = timeText.split(':');
+    if (parts.length >= 1) {
+      hour = parseInt(parts[0], 10);
+    }
+  } catch (err) {
+    debugInfo.push('❌ 时间格式错误:' + timeText);
     done({ timeFound: false, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
     return;
   }
 
-  // 步骤2: 在左侧列表中查找时间索引
-  // 所有时间都会显示，不需要过滤
-  var timeItems = Array.from(leftUl.querySelectorAll('li'));
-  debugInfo.push('左侧时间项数:' + timeItems.length);
-
-  // 输出所有时间项的详细信息用于调试
-  if (debug) {
-    var timeListDebug = [];
-    for (var i = 0; i < Math.min(timeItems.length, 20); i++) {
-      var item = timeItems[i];
-      var text = norm(item.textContent);
-      var classes = item.className || '';
-      var visible = item.offsetParent !== null ? 'v' : 'h';
-      timeListDebug.push(i + ':' + text + '(' + visible + ')');
-    }
-    debugInfo.push('时间列表=' + timeListDebug.join(','));
-  }
-
-  var timeIndex = -1;
-  for (var i = 0; i < timeItems.length; i++) {
-    if (norm(timeItems[i].textContent) === norm(timeText)) {
-      timeIndex = i;
-      break;
-    }
-  }
-
-  if (timeIndex === -1) {
-    debugInfo.push('❌ 未找到时间"' + timeText + '"');
+  if (hour < 7 || hour > 21) {
+    debugInfo.push('❌ 时间超出范围(7-21):' + hour);
     done({ timeFound: false, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
     return;
   }
 
-  debugInfo.push('✓ 时间"' + timeText + '"→索引' + timeIndex);
+  // 直接计算行索引：7点=0, 8点=1, ..., 18点=11, ..., 21点=14
+  var rowIndex = hour - 7;
+  debugInfo.push('✓ 时间' + timeText + '→行索引' + rowIndex + ' (计算:' + hour + '-7)');
 
-  // 步骤3: 查找右侧座位容器 div.tables
-  var tablesDiv = document.querySelector('div.tables');
-  if (!tablesDiv) {
-    debugInfo.push('❌ 未找到 div.tables');
-    done({ timeFound: true, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
-    return;
-  }
-
-  // 步骤4: 使用正确的选择器获取座位行
-  // 关键：选择 div.inner-seat-wrapper.clearfix，然后获取其子元素中的 clearfix
+  // 步骤2: 获取右侧座位容器
   var wrapper = document.querySelector('div.inner-seat-wrapper.clearfix');
   if (!wrapper) {
-    debugInfo.push('❌ 未找到 div.inner-seat-wrapper.clearfix');
-    done({ timeFound: true, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
+    debugInfo.push('❌ 未找到wrapper');
+    done({ timeFound: false, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
     return;
   }
 
-  // 获取所有座位行（改进选择策略）
+  // 步骤3: 获取所有座位行
   var seatRows = [];
   var wrapperChildren = Array.from(wrapper.children);
 
-  // 策略1: 获取wrapper的直接子元素中的clearfix div
+  // 获取wrapper的直接子元素中的clearfix div（跳过ul元素）
   for (var i = 0; i < wrapperChildren.length; i++) {
     var child = wrapperChildren[i];
-    // 跳过ul元素（场地名称）
     if (child.tagName.toLowerCase() === 'ul') continue;
-    // 只选择div.clearfix
     if (child.tagName.toLowerCase() === 'div' && child.classList.contains('clearfix')) {
       seatRows.push(child);
     }
   }
 
-  // 策略2: 如果策略1失败，尝试用querySelectorAll
-  if (seatRows.length === 0) {
-    debugInfo.push('策略1失败→策略2');
-    var allClearfix = wrapper.querySelectorAll(':scope > div.clearfix');
-    seatRows = Array.from(allClearfix);
-  }
-
   debugInfo.push('座位行数:' + seatRows.length + '行');
 
   // 调试：输出wrapper的子元素类型
-  if (debug && seatRows.length === 0) {
+  if (debug || seatRows.length === 0) {
     var childTags = [];
-    for (var i = 0; i < Math.min(wrapperChildren.length, 5); i++) {
+    for (var i = 0; i < Math.min(wrapperChildren.length, 10); i++) {
       var c = wrapperChildren[i];
       var tag = c.tagName.toLowerCase();
       var cls = c.className || 'no-class';
       childTags.push(tag + '.' + cls);
     }
     debugInfo.push('Wrapper子元素:' + childTags.join(','));
-  }
-
-  // 检查数量匹配
-  if (timeItems.length !== seatRows.length) {
-    debugInfo.push('⚠️ 警告:左侧时间(' + timeItems.length + ')≠右侧座位行(' + seatRows.length + ') 索引会错位！');
   }
 
   // 输出每行的座位数量用于调试
@@ -739,15 +690,20 @@ try {
     debugInfo.push('座位行明细=' + rowInfo.join(','));
   }
 
-  if (timeIndex >= seatRows.length) {
-    debugInfo.push('❌ 时间索引' + timeIndex + '超出范围(共' + seatRows.length + '行)');
+  if (seatRows.length === 0) {
+    debugInfo.push('❌ 未找到座位行(可能未加载)');
+    done({ timeFound: false, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
+    return;
+  }
+
+  if (rowIndex >= seatRows.length) {
+    debugInfo.push('❌ 行索引' + rowIndex + '超出范围(共' + seatRows.length + '行)');
     done({ timeFound: true, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
     return;
   }
 
-  // 步骤5: 获取对应时间行的所有座位
-  // seatRows[timeIndex] 就是正确的那一行
-  var targetRow = seatRows[timeIndex];
+  // 步骤4: 直接访问对应行的所有座位
+  var targetRow = seatRows[rowIndex];
   var allSeats = Array.from(targetRow.children).filter(function(child) {
     return child.classList.contains('seat');
   });
@@ -757,7 +713,7 @@ try {
   var availableCount = 0;
   var boughtCount = 0;
 
-  // 步骤6: 遍历该行所有座位，统计可用和已订数量
+  // 步骤5: 遍历该行所有座位，统计可用和已订数量
   for (var j = 0; j < allSeats.length; j++) {
     var seat = allSeats[j];
     var innerSeat = seat.querySelector('.inner-seat');
@@ -806,14 +762,13 @@ try {
 # ---------- 关键：严格判断是否"真的选择成功/已下单成功" ----------
 STRICT_CHECK_JS = r"""
 /*
-  基于HTML_STRUCTURE_FINAL.md的正确索引映射逻辑
+  使用直接索引映射：不读取文字，直接根据时间计算行索引
 
-  策略：
-  1. 在左侧 ul.leftUl 中找到时间索引
-  2. 在右侧 div.inner-seat-wrapper.clearfix 中获取座位行
-  3. 直接索引映射：li[N] → seatRows[N] → seats[M]
-  4. 检查状态并点击
-  5. 检测右侧面板状态变化
+  索引映射规则：
+  - 时间格式: "07:00", "08:00", ..., "21:00"
+  - 行索引: 07:00 -> 0, 08:00 -> 1, ..., 18:00 -> 11, ..., 21:00 -> 14
+  - 计算公式: rowIndex = hour - 7
+  - 场地索引: courtIndex (1-based) -> array[courtIndex - 1]
 
   返回：{
     status: "OK_SELECTED" | "TIME_NOT_FOUND" | "COURT_NOT_AVAILABLE" | "CLICK_NO_EFFECT" | "JS_EXCEPTION",
@@ -875,76 +830,66 @@ try {
   var debugInfo = [];
   debugInfo.push('🎯 目标:时间=' + timeText + ' 场地=' + courtIndex);
 
-  // ========== 步骤1: 在左侧时间列表中查找时间索引 ==========
-  var leftUl = document.querySelector('ul.leftUl');
-  if (!leftUl) {
-    debugInfo.push('❌ 未找到ul.leftUl');
-    finish({ status: 'TIME_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
-    return;
-  }
-
-  var timeItems = Array.from(leftUl.querySelectorAll('li'));
-  var timeIndex = -1;
-  for (var i = 0; i < timeItems.length; i++) {
-    if (norm(timeItems[i].textContent) === norm(timeText)) {
-      timeIndex = i;
-      break;
+  // ========== 步骤1: 解析时间字符串，直接计算行索引 ==========
+  var hour = -1;
+  try {
+    var parts = timeText.split(':');
+    if (parts.length >= 1) {
+      hour = parseInt(parts[0], 10);
     }
-  }
-
-  if (timeIndex === -1) {
-    debugInfo.push('❌ 未找到时间"' + timeText + '"');
+  } catch (err) {
+    debugInfo.push('❌ 时间格式错误:' + timeText);
     finish({ status: 'TIME_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
     return;
   }
 
-  debugInfo.push('✓ 时间"' + timeText + '"→索引' + timeIndex);
+  if (hour < 7 || hour > 21) {
+    debugInfo.push('❌ 时间超出范围(7-21):' + hour);
+    finish({ status: 'TIME_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
+    return;
+  }
 
-  // ========== 步骤2: 获取右侧座位行（使用正确的选择器） ==========
+  // 直接计算行索引：7点=0, 8点=1, ..., 18点=11, ..., 21点=14
+  var rowIndex = hour - 7;
+  debugInfo.push('✓ 时间' + timeText + '→行索引' + rowIndex + ' (计算:' + hour + '-7)');
+
+  // ========== 步骤2: 获取右侧座位容器 ==========
   var wrapper = document.querySelector('div.inner-seat-wrapper.clearfix');
   if (!wrapper) {
-    debugInfo.push('❌ 未找到div.inner-seat-wrapper.clearfix');
+    debugInfo.push('❌ 未找到wrapper');
     finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
     return;
   }
 
-  // 获取所有座位行（改进选择策略）
+  // 获取所有座位行
   var seatRows = [];
   var wrapperChildren = Array.from(wrapper.children);
 
-  // 策略1: 获取wrapper的直接子元素中的clearfix div
+  // 获取wrapper的直接子元素中的clearfix div（跳过ul元素）
   for (var i = 0; i < wrapperChildren.length; i++) {
     var child = wrapperChildren[i];
-    // 跳过ul元素（场地名称）
     if (child.tagName.toLowerCase() === 'ul') continue;
-    // 只选择div.clearfix
     if (child.tagName.toLowerCase() === 'div' && child.classList.contains('clearfix')) {
       seatRows.push(child);
     }
   }
 
-  // 策略2: 如果策略1失败，尝试用querySelectorAll
+  debugInfo.push('座位行数:' + seatRows.length + '行');
+
   if (seatRows.length === 0) {
-    debugInfo.push('策略1失败→策略2');
-    var allClearfix = wrapper.querySelectorAll(':scope > div.clearfix');
-    seatRows = Array.from(allClearfix);
-  }
-
-  debugInfo.push('左侧时间:' + timeItems.length + ' 右侧座位行:' + seatRows.length);
-
-  // 检查数量匹配
-  if (timeItems.length !== seatRows.length) {
-    debugInfo.push('⚠️ 警告:左右数量不匹配！');
-  }
-
-  if (timeIndex >= seatRows.length) {
-    debugInfo.push('❌ 时间索引' + timeIndex + '超出范围(共' + seatRows.length + '行)');
+    debugInfo.push('❌ 未找到座位行(可能未加载)');
     finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
     return;
   }
 
-  // ========== 步骤3: 获取对应时间行的所有座位 ==========
-  var targetRow = seatRows[timeIndex];
+  if (rowIndex >= seatRows.length) {
+    debugInfo.push('❌ 行索引' + rowIndex + '超出范围(共' + seatRows.length + '行)');
+    finish({ status: 'COURT_NOT_AVAILABLE', before: before, after: before, info: debugInfo.join(' | ') });
+    return;
+  }
+
+  // ========== 步骤3: 直接访问对应行的所有座位 ==========
+  var targetRow = seatRows[rowIndex];
   var allSeats = Array.from(targetRow.children).filter(function(child) {
     return child.classList.contains('seat');
   });
