@@ -64,7 +64,11 @@ class BookingConfig:
         return replace(
             self,
             preferred_slots=list(self.preferred_slots or [
-
+                "07:00",
+                "08:00",
+                "09:00",
+                "10:00",
+                "11:00",
                 "12:00",
                 "13:00",
                 "14:00",
@@ -75,6 +79,7 @@ class BookingConfig:
                 "19:00",
                 "20:00",
                 "21:00",
+                "22:00",
             ]),
         )
 # ==================================================
@@ -433,8 +438,8 @@ FIND_FIRST_AVAILABLE_COURT_JS = r"""
   包含等待逻辑：等待座位行加载完成
 
   索引映射规则：
-  - 时间格式: "07:00", "08:00", ..., "21:00"
-  - 行索引: 07:00 -> 0, 08:00 -> 1, ..., 18:00 -> 11, ..., 21:00 -> 14
+  - 时间格式: "07:00", "08:00", ..., "22:00"
+  - 行索引: 07:00 -> 0, 08:00 -> 1, ..., 21:00 -> 14, 22:00 -> 15
   - 计算公式: rowIndex = hour - 7
 
   返回: {
@@ -484,12 +489,12 @@ try {
     return;
   }
 
-  if (hour < 7 || hour > 21) {
-    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: '❌ 时间超出范围(7-21):' + hour });
+  if (hour < 7 || hour > 22) {
+    done({ found: false, courtIndex: 0, courtName: '', totalSeats: 0, debugInfo: '❌ 时间超出范围(7-22):' + hour });
     return;
   }
 
-  // 直接计算行索引：7点=0, 8点=1, ..., 18点=11, ..., 21点=14
+  // 直接计算行索引：7点=0, 8点=1, ..., 21点=14, 22点=15
   var rowIndex = hour - 7;
   debugInfo.push('✓ 时间' + timeText + '→行索引' + rowIndex + ' (计算:' + hour + '-7)');
 
@@ -621,8 +626,8 @@ QUICK_CHECK_AVAILABILITY_JS = r"""
   包含等待逻辑：等待座位行加载完成
 
   索引映射规则：
-  - 时间格式: "07:00", "08:00", ..., "21:00"
-  - 行索引: 07:00 -> 0, 08:00 -> 1, ..., 18:00 -> 11, ..., 21:00 -> 14
+  - 时间格式: "07:00", "08:00", ..., "22:00"
+  - 行索引: 07:00 -> 0, 08:00 -> 1, ..., 21:00 -> 14, 22:00 -> 15
   - 计算公式: rowIndex = hour - 7
 */
 var timeText = arguments[0];
@@ -666,13 +671,13 @@ try {
     return;
   }
 
-  if (hour < 7 || hour > 21) {
-    debugInfo.push('❌ 时间超出范围(7-21):' + hour);
+  if (hour < 7 || hour > 22) {
+    debugInfo.push('❌ 时间超出范围(7-22):' + hour);
     done({ timeFound: false, availableCount: 0, totalSeats: 0, boughtCount: 0, debugInfo: debugInfo.join(' | '), sampleClasses: [] });
     return;
   }
 
-  // 直接计算行索引：7点=0, 8点=1, ..., 18点=11, ..., 21点=14
+  // 直接计算行索引：7点=0, 8点=1, ..., 21点=14, 22点=15
   var rowIndex = hour - 7;
   debugInfo.push('✓ 时间' + timeText + '→行索引' + rowIndex + ' (计算:' + hour + '-7)');
 
@@ -817,8 +822,8 @@ STRICT_CHECK_JS = r"""
   包含等待逻辑：等待座位行加载完成
 
   索引映射规则：
-  - 时间格式: "07:00", "08:00", ..., "21:00"
-  - 行索引: 07:00 -> 0, 08:00 -> 1, ..., 18:00 -> 11, ..., 21:00 -> 14
+  - 时间格式: "07:00", "08:00", ..., "22:00"
+  - 行索引: 07:00 -> 0, 08:00 -> 1, ..., 21:00 -> 14, 22:00 -> 15
   - 计算公式: rowIndex = hour - 7
   - 场地索引: courtIndex (1-based) -> array[courtIndex - 1]
 
@@ -911,13 +916,13 @@ try {
     return;
   }
 
-  if (hour < 7 || hour > 21) {
-    debugInfo.push('❌ 时间超出范围(7-21):' + hour);
+  if (hour < 7 || hour > 22) {
+    debugInfo.push('❌ 时间超出范围(7-22):' + hour);
     finish({ status: 'TIME_NOT_FOUND', before: before, after: before, info: debugInfo.join(' | ') });
     return;
   }
 
-  // 直接计算行索引：7点=0, 8点=1, ..., 18点=11, ..., 21点=14
+  // 直接计算行索引：7点=0, 8点=1, ..., 21点=14, 22点=15
   var rowIndex = hour - 7;
   debugInfo.push('✓ 时间' + timeText + '→行索引' + rowIndex + ' (计算:' + hour + '-7)');
 
